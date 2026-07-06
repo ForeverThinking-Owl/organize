@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx src/examples/customer-after-sales.demo.ts",
     "demo": "tsx src/examples/customer-after-sales.demo.ts",
-    "demo:llm": "LLM_MODE=real tsx src/examples/customer-after-sales.demo.ts",
+    "demo:llm": "tsx src/examples/customer-after-sales.llm.demo.ts",
     "build": "tsc",
     "start:dist": "node dist/examples/customer-after-sales.demo.js",
     "typecheck": "tsc --noEmit"
