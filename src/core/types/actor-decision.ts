@@ -31,6 +31,8 @@ export interface ToolCallDecision extends DecisionBase {
     toolName: string;
     arguments: Record<string, unknown>;
     purpose: string;
+    /** 结果写入的 key（不传则用 originatingStepKey） */
+    outputKey?: string;
   };
   permissionCheck?: {
     allowed: boolean;

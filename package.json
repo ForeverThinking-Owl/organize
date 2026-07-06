@@ -1,6 +1,6 @@
 {
   "name": "@foreverthinking/organize",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "自运组织 — 让 AI 参与社会实践，人类保留审批、监督与责任",
   "private": true,
   "scripts": {

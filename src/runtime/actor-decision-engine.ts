@@ -1,8 +1,6 @@
 // ============================================================================
 // ActorDecisionEngine — Actor 决策引擎
-// 根据当前步骤和上下文生成 ActorDecision
-// v0.1.2: mockLLMJudge 只在 ActorRuntime 预执行阶段调用一次；
-//         decideLLMJudge 从 state 读取已存入的 judge 结果做后续决策
+// v0.1.3: decide() 接受可选的 prebuiltRequest，ToolCallDecision 携带完整 arguments
 // ============================================================================
 
 import {
@@ -12,12 +10,12 @@ import {
 } from "../core/types/actor-decision";
 import { SkillStep, ToolCallStep, LLMJudgeStep, ReturnStep } from "../core/types/skill";
 import { ActorContext } from "../core/types/actor";
+import { ToolCallRequest } from "../core/types/tool";
 import { SkillState } from "./skill-runtime";
 import { traceLogger } from "../trace/trace-logger";
 
 /**
  * Mock LLM 判断逻辑（纯函数，可独立测试）
- * 基于输入文本关键词做规则判断，模拟 LLM 的分流决策
  */
 export function mockLLMJudge(
   _instruction: string,
@@ -47,26 +45,21 @@ export function mockLLMJudge(
 
 export class ActorDecisionEngine {
   /**
-   * 根据当前步骤生成决策
-   * 注意：llm_judge 的结果应已由 ActorRuntime 预执行存入 state
+   * @param prebuiltRequest 当 step.type === "tool_call" 时，已解析好 arguments 的请求
    */
   decide(
     step: SkillStep,
     context: ActorContext,
     state: SkillState,
-    actorRunId: string
+    actorRunId: string,
+    prebuiltRequest?: ToolCallRequest
   ): ActorDecision {
     switch (step.type) {
       case "tool_call":
-        return this.decideToolCall(step as ToolCallStep, context, actorRunId);
+        return this.decideToolCall(step as ToolCallStep, context, actorRunId, prebuiltRequest);
 
       case "llm_judge":
-        return this.decideFromJudgeResult(
-          step as LLMJudgeStep,
-          context,
-          state,
-          actorRunId
-        );
+        return this.decideFromJudgeResult(step as LLMJudgeStep, context, state, actorRunId);
 
       case "return":
         return this.decideReturn(step as ReturnStep, state, actorRunId);
@@ -80,14 +73,11 @@ export class ActorDecisionEngine {
     }
   }
 
-  /**
-   * tool_call step → 生成 tool_call 决策
-   * 参数解析由 buildToolCallRequest 在 executor 中完成
-   */
   private decideToolCall(
     step: ToolCallStep,
     context: ActorContext,
-    actorRunId: string
+    actorRunId: string,
+    prebuiltRequest?: ToolCallRequest
   ): ToolCallDecision {
     const tool = context.availableTools.find((t) => t.name === step.toolName);
 
@@ -102,7 +92,7 @@ export class ActorDecisionEngine {
       reasoningSummary: `Skill 步骤 ${step.stepKey} → ${step.toolName}`,
       toolCall: {
         toolName: step.toolName,
-        arguments: {}, // 由 executor 通过 buildToolCallRequest 解析
+        arguments: prebuiltRequest?.arguments ?? {},
         purpose: tool?.description ?? `执行 ${step.toolName}`,
       },
       permissionCheck: {
@@ -112,9 +102,6 @@ export class ActorDecisionEngine {
     };
   }
 
-  /**
-   * llm_judge step → 从 state 读取已计算的 judge 结果，判断后续动作
-   */
   private decideFromJudgeResult(
     step: LLMJudgeStep,
     context: ActorContext,
@@ -129,7 +116,6 @@ export class ActorDecisionEngine {
       judgeResult,
     });
 
-    // 判断是否需要创建工单
     if (judgeResult.should_create_ticket === true) {
       const ticketDecision: ToolCallDecision = {
         decisionType: "tool_call",
@@ -145,6 +131,7 @@ export class ActorDecisionEngine {
             customer_id: context.runtimeContext.customer_id ?? "C001",
           },
           purpose: "为客户问题创建处理工单",
+          outputKey: "create_ticket_result",
         },
         permissionCheck: {
           allowed: context.permissions.allowedTools.includes("create_ticket"),
@@ -163,7 +150,6 @@ export class ActorDecisionEngine {
       return ticketDecision;
     }
 
-    // 不需要创建工单，返回判断结果
     return {
       decisionType: "final_output",
       reasoningSummary: `分流判断完成: ${judgeResult.reason ?? ""}`,
@@ -171,9 +157,6 @@ export class ActorDecisionEngine {
     };
   }
 
-  /**
-   * return step → 汇总输出
-   */
   private decideReturn(
     _step: ReturnStep,
     state: SkillState,
@@ -184,6 +167,7 @@ export class ActorDecisionEngine {
       triage: state.steps["judge"] ?? {},
       order_info: state.steps["query_order"] ?? {},
       ticket_history: state.steps["query_history"] ?? {},
+      create_ticket_result: state.outputs["create_ticket_result"] ?? null,
       observations_count: state.observations.length,
     };
 

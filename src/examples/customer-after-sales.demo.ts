@@ -131,6 +131,41 @@ function runChecks(output: ActorRunOutput): CheckResult[] {
         : "未生成记忆候选" },
     { id: 13, label: "Trace 记录完整链路", pass: trace.events.length >= 10,
       detail: "Trace 记录了 " + trace.events.length + " 个事件，覆盖 " + [...new Set(eventTypes as string[])].join(", ") },
+    // ---- v0.1.3 新增：参数传递 + 状态完整性 ----
+    (() => {
+      const evt = events.find((e) => e.eventType === "tool_call_start" && e.data.toolName === "query_order_info");
+      const args = evt?.data.arguments as Record<string, unknown> | undefined;
+      const pass = args?.order_id === "ORDER_10086";
+      return { id: 14, label: "query_order_info 的 arguments.order_id = ORDER_10086", pass,
+        detail: pass ? "order_id 正确传入" : "order_id 缺失或错误: " + JSON.stringify(args) };
+    })(),
+    (() => {
+      const evt = events.find((e) => e.eventType === "tool_call_start" && e.data.toolName === "query_ticket_history");
+      const args = evt?.data.arguments as Record<string, unknown> | undefined;
+      const pass = args?.customer_id === "C001";
+      return { id: 15, label: "query_ticket_history 的 arguments.customer_id = C001", pass,
+        detail: pass ? "customer_id 正确传入" : "customer_id 缺失或错误: " + JSON.stringify(args) };
+    })(),
+    (() => {
+      const triage = output.result?.triage as Record<string, unknown> | undefined;
+      const pass = triage?.need_after_sales !== undefined && triage?.should_create_ticket !== undefined;
+      return { id: 16, label: "final_output.triage 保留 judge 结果，未被 create_ticket 覆盖", pass,
+        detail: pass ? "triage 完整: need_after_sales=" + triage?.need_after_sales + ", need_technical=" + triage?.need_technical
+          : "triage 被覆盖或缺失" };
+    })(),
+    (() => {
+      const toolCallCount = events.filter((e) => e.eventType === "tool_call_start").length;
+      const obsCount = output.result?.observations_count as number;
+      const pass = obsCount === toolCallCount;
+      return { id: 17, label: "observations_count 等于真实 ToolCall 数量", pass,
+        detail: "observations_count=" + obsCount + ", tool_call_start=" + toolCallCount };
+    })(),
+    (() => {
+      const pass = (output.pendingApproval?.toolName ?? "") === "" ||
+                    output.pendingApproval?.toolName === "create_ticket";
+      return { id: 18, label: "pendingApproval.toolName 为真实工具名（非 toolCallId）", pass,
+        detail: "toolName=" + (output.pendingApproval?.toolName ?? "N/A") };
+    })(),
   ];
 
   return checks;
@@ -142,7 +177,7 @@ function runChecks(output: ActorRunOutput): CheckResult[] {
 
 async function main() {
   console.log("=".repeat(60));
-  console.log("  ForeverThinking v0.1.2 — 单 Actor 最小闭环 Demo");
+  console.log("  ForeverThinking v0.1.3 — 单 Actor 最小闭环 Demo");
   console.log("=".repeat(60));
   console.log();
   console.log("📥 Input: 客户说扫码枪连不上系统，还要求退款。");

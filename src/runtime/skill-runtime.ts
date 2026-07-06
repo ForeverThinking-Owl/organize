@@ -108,16 +108,15 @@ export class SkillRuntime {
   /**
    * 记录 tool_call 步骤完成，将结果写入 state
    */
+  /**
+   * 记录 tool_call 步骤完成（仅 trace，state 写入由 ActorDecisionExecutor 负责）
+   */
   completeToolCallStep(
     step: ToolCallStep,
-    state: SkillState,
+    _state: SkillState,
     observation: ToolObservation,
     actorRunId: string
   ): void {
-    state.steps[step.stepKey] = observation.data ?? {};
-    state.outputs[step.outputKey] = observation.data ?? {};
-    state.observations.push(observation);
-
     traceLogger.record(actorRunId, "skill_step_end", {
       stepKey: step.stepKey,
       status: observation.status,
