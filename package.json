@@ -1,0 +1,18 @@
+{
+  "name": "@foreverthinking/organize",
+  "version": "0.1.2",
+  "description": "自运组织 — 让 AI 参与社会实践，人类保留审批、监督与责任",
+  "private": true,
+  "scripts": {
+    "dev": "tsx src/examples/customer-after-sales.demo.ts",
+    "demo": "tsx src/examples/customer-after-sales.demo.ts",
+    "build": "tsc",
+    "start:dist": "node dist/examples/customer-after-sales.demo.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
