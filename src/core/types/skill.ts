@@ -42,6 +42,8 @@ export interface LLMJudgeStep extends SkillStepBase {
   type: "llm_judge";
   instruction: string;
   outputKey: string;
+  /** v0.2.0: 结构化判断输出 schema */
+  outputSchema?: Record<string, unknown>;
 }
 
 export interface TransformStep extends SkillStepBase {
