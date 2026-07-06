@@ -1,7 +1,7 @@
 // ============================================================================
 // ActorRuntime — Actor Kernel 主执行器
-// v0.1.3: prebuiltRequest → decision → executor 完整链路；
-//         buildOutput 修复 toolName；executor 单点写 state
+// v0.1.4: prebuiltRequest → decision → executor 完整链路；
+//         buildOutput 输出 toolCalls / approvals 摘要
 // ============================================================================
 
 import { ActorConfig } from "../core/types/actor";
@@ -35,6 +35,21 @@ export interface ActorRunOutput {
     toolName: string;
     reason: string;
   };
+  toolCalls: Array<{
+    toolCallId: string;
+    toolName: string;
+    arguments: Record<string, unknown>;
+    stepKey?: string;
+  }>;
+  approvals: Array<{
+    approvalRequestId: string;
+    toolName: string;
+    toolCallId?: string;
+    stage?: string;
+    reason?: string;
+    decision?: string;
+    decidedBy?: string;
+  }>;
   memoryCandidates: Array<{
     candidateId: string; scope: string; type: string; content: string; confidence?: number;
   }>;
@@ -135,7 +150,7 @@ export class ActorRuntime {
   ): Promise<ActorRunOutput> {
     const saved = this.runs.get(actorRunId);
     if (!saved) {
-      return { actorRunId, status: "error", result: null, memoryCandidates: [],
+      return { actorRunId, status: "error", result: null, toolCalls: [], approvals: [], memoryCandidates: [],
         trace: { actorRunId, eventCount: 0, events: [] } };
     }
 
@@ -267,20 +282,42 @@ export class ActorRuntime {
   ): ActorRunOutput {
     const trace = traceLogger.getTrace(actorRunId)!;
 
-    // 从 executor 的 pendingExec 获取真实 toolName
-    let pendingToolName = "";
-    if (pendingApproval) {
-      const runState = actorDecisionExecutor.getRun(actorRunId);
-      pendingToolName = runState?.pendingExec?.pendingToolName ?? pendingApproval.toolCallId;
-    }
+    const toolCalls = trace.events
+      .filter((e) => e.eventType === "tool_call_start")
+      .map((e) => ({
+        toolCallId: String(e.data.toolCallId ?? ""),
+        toolName: String(e.data.toolName ?? ""),
+        arguments: (e.data.arguments ?? {}) as Record<string, unknown>,
+        stepKey: e.stepKey,
+      }));
+
+    const approvals = trace.events
+      .filter((e) => e.eventType === "approval_requested")
+      .map((e) => {
+        const decision = trace.events.find((d) =>
+          d.eventType === "approval_decided" &&
+          d.data.approvalRequestId === e.data.approvalRequestId
+        );
+        return {
+          approvalRequestId: String(e.data.approvalRequestId ?? ""),
+          toolName: String(e.data.toolName ?? ""),
+          toolCallId: e.data.toolCallId ? String(e.data.toolCallId) : undefined,
+          stage: e.data.stage ? String(e.data.stage) : undefined,
+          reason: e.data.reason ? String(e.data.reason) : undefined,
+          decision: decision?.data.decision ? String(decision.data.decision) : undefined,
+          decidedBy: decision?.data.decidedBy ? String(decision.data.decidedBy) : undefined,
+        };
+      });
 
     return {
       actorRunId, status, result,
       pendingApproval: pendingApproval ? {
         approvalRequestId: pendingApproval.approvalRequestId,
-        toolName: pendingToolName,
+        toolName: pendingApproval.toolName,
         reason: pendingApproval.reason,
       } : undefined,
+      toolCalls,
+      approvals,
       memoryCandidates: memoryCandidates ?? [],
       trace: {
         actorRunId, eventCount: trace.events.length,
