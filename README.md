@@ -1,3 +1,5 @@
+[English](README.en.md) | 中文
+
 # organize — 自运组织
 
 > foreverthinking · AI 参与社会实践，人类保留审批、监督与责任

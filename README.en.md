@@ -1,3 +1,5 @@
+[中文](README.md) | English
+
 # organize — Self-Operating Organization
 
 > foreverthinking · AI participates in social practice. Humans retain approval, supervision & responsibility.
