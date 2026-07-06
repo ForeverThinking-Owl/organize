@@ -14,6 +14,8 @@ export type ApprovalStage = "before_call" | "after_call" | "before_writeback";
 export interface ApprovalRequest {
   approvalRequestId: string;
   toolCallId: string;
+  /** 真实工具名，供审批页、Trace 和 ActorRunOutput 直接展示 */
+  toolName: string;
   stage: ApprovalStage;
   riskLevel: "low" | "medium" | "high" | "critical";
   reason: string;
