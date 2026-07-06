@@ -1,7 +1,6 @@
 // ============================================================================
 // ActorRuntime — Actor Kernel 主执行器
-// v0.1.4: prebuiltRequest → decision → executor 完整链路；
-//         buildOutput 输出 toolCalls / approvals 摘要
+// v0.2.0: llm_judge 通过 ActorDecisionEngine.generateJudgeResult 接入 LLMGateway
 // ============================================================================
 
 import { ActorConfig } from "../core/types/actor";
@@ -10,7 +9,7 @@ import { ToolCallRequest } from "../core/types/tool";
 import { ApprovalDecision } from "../core/types/approval";
 import { actorContextBuilder } from "./actor-context-builder";
 import { skillRuntime, SkillState, buildToolCallRequest } from "./skill-runtime";
-import { actorDecisionEngine, mockLLMJudge } from "./actor-decision-engine";
+import { actorDecisionEngine } from "./actor-decision-engine";
 import { actorDecisionExecutor } from "./actor-decision-executor";
 import { memoryService } from "../memory/memory-service";
 import { traceLogger } from "../trace/trace-logger";
@@ -77,7 +76,8 @@ function parseSkill(config: SkillConfig, actorId: string): Skill {
             inputMapping: s.input_mapping as Record<string, string>, outputKey: s.output_key as string } as ToolCallStep;
         case "llm_judge":
           return { ...base, type: "llm_judge", instruction: s.instruction as string,
-            outputKey: s.output_key as string } as LLMJudgeStep;
+            outputKey: s.output_key as string,
+            outputSchema: s.output_schema as Record<string, unknown> | undefined } as LLMJudgeStep;
         case "transform":
           return { ...base, type: "transform",
             mapping: s.mapping as Record<string, string>, outputKey: s.output_key as string } as TransformStep;
@@ -189,10 +189,15 @@ export class ActorRuntime {
       const step = skillRuntime.getCurrentStep(skill, state);
       if (!step) { state.status = "completed"; break; }
 
-      // ---- llm_judge 预执行 ----
+      // ---- llm_judge 预执行：v0.2.0 由 LLMGateway 产生结构化判断 ----
       if (step.type === "llm_judge") {
         const judgeStep = step as LLMJudgeStep;
-        const judgeResult = mockLLMJudge(judgeStep.instruction, context, state);
+        const judgeResult = await actorDecisionEngine.generateJudgeResult({
+          step: judgeStep,
+          context,
+          state,
+          actorRunId,
+        });
         skillRuntime.executeLLMJudge(judgeStep, state, actorRunId, judgeResult);
       }
 
