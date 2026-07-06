@@ -1,10 +1,10 @@
 // ============================================================================
-// customer-after-sales.demo.ts — v0.1.2
+// customer-after-sales.demo.ts — v0.1.4
 // 单 Actor 最小闭环 Demo
 //
 // 场景：客户说扫码枪连不上系统，还要求退款。
 //
-// 验证 13 条验收标准 + waiting_approval / continue 流程
+// 验证 18 条验收标准 + waiting_approval / continue 流程
 // ============================================================================
 
 import { actorRuntime, ActorRunOutput } from "../runtime/actor-runtime";
@@ -57,11 +57,23 @@ const SKILL_CONFIG = {
   ],
 };
 
-// ---------------------------------------------------------------------------
-// 验收检查
-// ---------------------------------------------------------------------------
-
 interface CheckResult { id: number; label: string; pass: boolean; detail: string; }
+
+function registerTools(): void {
+  toolGateway.registerDefinition(queryOrderInfoTool);
+  toolGateway.registerDefinition(queryTicketHistoryTool);
+  toolGateway.registerDefinition(createTicketTool);
+  toolGateway.registerExecutor("query_order_info", new QueryOrderInfoExecutor());
+  toolGateway.registerExecutor("query_ticket_history", new QueryTicketHistoryExecutor());
+  toolGateway.registerExecutor("create_ticket", new CreateTicketExecutor());
+}
+
+function resetRuntime(): void {
+  traceLogger.clear();
+  memoryService.clear();
+  approvalGate.clear();
+  registerTools();
+}
 
 function runChecks(output: ActorRunOutput): CheckResult[] {
   const trace = traceLogger.getTrace(output.actorRunId)!;
@@ -131,7 +143,6 @@ function runChecks(output: ActorRunOutput): CheckResult[] {
         : "未生成记忆候选" },
     { id: 13, label: "Trace 记录完整链路", pass: trace.events.length >= 10,
       detail: "Trace 记录了 " + trace.events.length + " 个事件，覆盖 " + [...new Set(eventTypes as string[])].join(", ") },
-    // ---- v0.1.3 新增：参数传递 + 状态完整性 ----
     (() => {
       const evt = events.find((e) => e.eventType === "tool_call_start" && e.data.toolName === "query_order_info");
       const args = evt?.data.arguments as Record<string, unknown> | undefined;
@@ -171,28 +182,15 @@ function runChecks(output: ActorRunOutput): CheckResult[] {
   return checks;
 }
 
-// ---------------------------------------------------------------------------
-// Demo
-// ---------------------------------------------------------------------------
-
 async function main() {
   console.log("=".repeat(60));
-  console.log("  ForeverThinking v0.1.3 — 单 Actor 最小闭环 Demo");
+  console.log("  ForeverThinking v0.1.4 — 单 Actor 最小闭环 Demo");
   console.log("=".repeat(60));
   console.log();
   console.log("📥 Input: 客户说扫码枪连不上系统，还要求退款。");
   console.log();
 
-  // 清理
-  traceLogger.clear();
-  memoryService.clear();
-  approvalGate.clear();
-  toolGateway.registerDefinition(queryOrderInfoTool);
-  toolGateway.registerDefinition(queryTicketHistoryTool);
-  toolGateway.registerDefinition(createTicketTool);
-  toolGateway.registerExecutor("query_order_info", new QueryOrderInfoExecutor());
-  toolGateway.registerExecutor("query_ticket_history", new QueryTicketHistoryExecutor());
-  toolGateway.registerExecutor("create_ticket", new CreateTicketExecutor());
+  resetRuntime();
 
   console.log("🔧 已注册 3 个 Tool:");
   console.log("   - query_order_info (read, low)");
@@ -200,7 +198,6 @@ async function main() {
   console.log("   - create_ticket (write, medium, urgent需审批)");
   console.log();
 
-  // ---- 路径 A: 自动审批（Demo 模式） ----
   console.log("🚀 路径 A: 自动审批 Demo 模式");
   console.log("-".repeat(40));
 
@@ -211,7 +208,6 @@ async function main() {
     runtimeContext: { order_id: "ORDER_10086", customer_id: "C001" },
   });
 
-  // 如果触发审批，自动通过
   if (output.status === "waiting_approval" && output.pendingApproval) {
     console.log("  ⏸  触发审批，Demo 模式自动通过...");
     output = await actorRuntime.continue(output.actorRunId, {
@@ -227,15 +223,16 @@ async function main() {
   }
 
   console.log("  Status: " + output.status);
+  console.log("  ToolCalls: " + output.toolCalls.length);
+  console.log("  Approvals: " + output.approvals.length);
   console.log("  MemoryCandidates: " + output.memoryCandidates.length);
   for (const mc of output.memoryCandidates) {
     console.log("    [" + mc.type + "] " + mc.content.substring(0, 60) + (mc.content.length > 60 ? "..." : ""));
   }
   console.log();
 
-  // ---- 验收检查 ----
   console.log("=".repeat(60));
-  console.log("  ✅ 验收检查 (13 条)");
+  console.log("  ✅ 验收检查 (18 条)");
   console.log("=".repeat(60));
   console.log();
 
@@ -257,7 +254,6 @@ async function main() {
   console.log("-".repeat(60));
   console.log();
 
-  // Trace
   console.log("📜 完整 Trace:");
   console.log("-".repeat(60));
   const trace = traceLogger.getTrace(output.actorRunId)!;
@@ -267,16 +263,12 @@ async function main() {
   });
   console.log();
 
-  // ---- 路径 B: waiting_approval / continue ----
   console.log("=".repeat(60));
   console.log("  🔄 路径 B: waiting_approval / continue 流程");
   console.log("=".repeat(60));
   console.log();
 
-  // 清理并重新注册
-  traceLogger.clear();
-  memoryService.clear();
-  approvalGate.clear();
+  resetRuntime();
 
   const outputB = await actorRuntime.run({
     actorConfig: ACTOR_CONFIG,
@@ -288,8 +280,8 @@ async function main() {
   console.log("  初始 Status: " + outputB.status);
   if (outputB.status === "waiting_approval" && outputB.pendingApproval) {
     console.log("  ⏸  暂停等待审批: " + outputB.pendingApproval.reason);
+    console.log("  Tool: " + outputB.pendingApproval.toolName);
 
-    // 模拟外部审批者提交决策
     const decision = {
       approvalRequestId: outputB.pendingApproval.approvalRequestId,
       decision: "approve_with_comment" as const,
@@ -304,6 +296,8 @@ async function main() {
     });
 
     console.log("  最终 Status: " + outputC.status);
+    console.log("  ToolCalls: " + outputC.toolCalls.length);
+    console.log("  Approvals: " + outputC.approvals.length);
     console.log("  MemoryCandidates: " + outputC.memoryCandidates.length);
     console.log();
     console.log("  ✅ waiting_approval / continue 流程验证通过！");
@@ -318,7 +312,7 @@ async function main() {
 main()
   .then(({ passCount, checks }) => {
     if (passCount === checks.length) {
-      console.log("\n🎉 v0.1.2 Actor Kernel 最小闭环验证通过！");
+      console.log("\n🎉 v0.1.4 Actor Kernel 最小闭环验证通过！");
       process.exit(0);
     } else {
       console.log("\n❌ " + (checks.length - passCount) + " 项未通过");
