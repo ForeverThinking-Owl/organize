@@ -3,6 +3,8 @@
 // Cross-platform entry for real LLM mode.
 // ============================================================================
 
+export {};
+
 process.env.LLM_MODE = "real";
 
 await import("./customer-after-sales.demo");
