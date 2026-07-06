@@ -1,7 +1,7 @@
 // ============================================================================
 // ApprovalGate — 审批网关
 // 判断 ToolCall 是否需要审批，处理审批请求和决策
-// v0.1.2: 支持 waiting_approval / continue 流程
+// v0.1.4: ApprovalRequest 带 toolName；approval_requested 在创建时记录
 // ============================================================================
 
 import {
@@ -61,6 +61,7 @@ export class ApprovalGate {
         const approvalRequest: ApprovalRequest = {
           approvalRequestId: `appr_${++approvalCounter}`,
           toolCallId: request.toolCallId,
+          toolName: request.toolName,
           stage: "before_call" as ApprovalStage,
           riskLevel: toolDef.riskLevel,
           reason: `Tool ${request.toolName} 参数 ${condition.field} ${condition.operator} ${condition.value} 触发审批`,
@@ -72,8 +73,18 @@ export class ApprovalGate {
 
         traceLogger.record(request.actorRunId, "approval_check", {
           required: true,
+          toolName: request.toolName,
           reason: approvalRequest.reason,
           approvalRequestId: approvalRequest.approvalRequestId,
+        });
+
+        traceLogger.record(request.actorRunId, "approval_requested", {
+          approvalRequestId: approvalRequest.approvalRequestId,
+          toolCallId: approvalRequest.toolCallId,
+          toolName: approvalRequest.toolName,
+          stage: approvalRequest.stage,
+          reason: approvalRequest.reason,
+          proposedArguments: approvalRequest.proposedArguments,
         });
 
         // 记录为待审批
@@ -107,12 +118,11 @@ export class ApprovalGate {
       return { accepted: false, reason: "ApprovalRequestId mismatch" };
     }
 
-    traceLogger.record(actorRunId, "approval_requested", {
-      approvalRequestId: pending.approvalRequestId,
+    traceLogger.record(actorRunId, "approval_decided", {
+      ...decision,
+      toolName: pending.toolName,
       toolCallId: pending.toolCallId,
-    });
-
-    traceLogger.record(actorRunId, "approval_decided", decision as unknown as Record<string, unknown>);
+    } as unknown as Record<string, unknown>);
 
     // 清除待审批状态
     this.pendingApprovals.delete(actorRunId);
