@@ -44,13 +44,13 @@ npm run start:dist  # 运行编译产物
 
 # organize — Self-Operating Organization
 
-> foreverthinking · AI participates in social practice. Humans retain approval, supervision & responsibility.
+> foreverthinking · AI participates in social practice. Humans retain practice sovereignty.
 
 ## Vision
 
-organize enables AI to participate in organizational practice just like humans: scheduling tasks, orchestrating tools, coordinating roles, and accumulating experience.
+organize aims to build an Actor Kernel for self-operating organizations, enabling AI to participate in organizational practice as practice subjects within human society: judging 5W1H, scheduling tasks, orchestrating tools, coordinating roles, and crystallizing experience.
 
-Humans move up from routine execution, retaining only practice sovereignty — setting goals, defining boundaries, adjudicating exceptions, approving risks, and bearing ultimate responsibility.
+Humans move up from routine execution, retaining practice sovereignty. Practice sovereignty includes: setting goals, defining boundaries, approving risks, supervising processes, adjudicating exceptions, and bearing ultimate responsibility.
 
 ```
 Input a practice event
