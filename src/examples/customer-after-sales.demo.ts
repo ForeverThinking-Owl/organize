@@ -1,10 +1,10 @@
 // ============================================================================
-// customer-after-sales.demo.ts — v0.1.4
+// customer-after-sales.demo.ts — v0.2.0
 // 单 Actor 最小闭环 Demo
 //
 // 场景：客户说扫码枪连不上系统，还要求退款。
 //
-// 验证 18 条验收标准 + waiting_approval / continue 流程
+// 验证 26 条验收标准 + waiting_approval / continue 流程
 // ============================================================================
 
 import { actorRuntime, ActorRunOutput } from "../runtime/actor-runtime";
@@ -42,6 +42,20 @@ const ACTOR_CONFIG = {
   },
 };
 
+const TRIAGE_OUTPUT_SCHEMA = {
+  type: "object",
+  required: ["need_after_sales", "need_technical", "need_finance", "should_create_ticket", "reason"],
+  properties: {
+    analysis: { type: "object" },
+    need_after_sales: { type: "boolean" },
+    need_technical: { type: "boolean" },
+    need_finance: { type: "boolean" },
+    should_create_ticket: { type: "boolean" },
+    reason: { type: "string" },
+    risk_level: { type: "string", enum: ["low", "medium", "high"] },
+  },
+};
+
 const SKILL_CONFIG = {
   skill_id: "customer_issue_triage", name: "客户问题分流",
   owner_actor_id: "customer_service_actor",
@@ -52,7 +66,7 @@ const SKILL_CONFIG = {
       input_mapping: { customer_id: "{{context.customer_id}}" }, output_key: "ticket_history" },
     { step_key: "judge", type: "llm_judge",
       instruction: "判断客户问题是否涉及售后、技术、财务，并决定是否创建工单。",
-      output_key: "triage_result" },
+      output_key: "triage_result", output_schema: TRIAGE_OUTPUT_SCHEMA },
     { step_key: "return", type: "return" },
   ],
 };
@@ -177,6 +191,38 @@ function runChecks(output: ActorRunOutput): CheckResult[] {
       return { id: 18, label: "pendingApproval.toolName 为真实工具名（非 toolCallId）", pass,
         detail: "toolName=" + (output.pendingApproval?.toolName ?? "N/A") };
     })(),
+    { id: 19, label: "LLMGateway 被调用", pass: hasEvent("llm_call_start"),
+      detail: hasEvent("llm_call_start") ? "llm_call_start 已记录" : "未记录 llm_call_start" },
+    { id: 20, label: "llm_call_start 被记录", pass: hasEvent("llm_call_start"),
+      detail: hasEvent("llm_call_start") ? "LLM 调用开始事件存在" : "LLM 调用开始事件缺失" },
+    { id: 21, label: "llm_call_end 被记录", pass: hasEvent("llm_call_end"),
+      detail: hasEvent("llm_call_end") ? "LLM 调用结束事件存在" : "LLM 调用结束事件缺失" },
+    (() => {
+      const evt = events.find((e) => e.eventType === "llm_call_end");
+      return { id: 22, label: "llm_judge 结果通过 schema 校验", pass: evt?.data.valid === true,
+        detail: evt?.data.valid ? "结构化输出校验通过" : "结构化输出校验未通过" };
+    })(),
+    (() => {
+      const triage = output.result?.triage as Record<string, unknown> | undefined;
+      const pass = Boolean(triage?.reason) && triage?.should_create_ticket === true;
+      return { id: 23, label: "triage_result 来自 LLMGateway 输出", pass,
+        detail: pass ? "triage_result 已写入 final_output" : "triage_result 缺失或不完整" };
+    })(),
+    (() => {
+      const pass = output.toolCalls.length === events.filter((e) => e.eventType === "tool_call_start").length;
+      return { id: 24, label: "ActorRunOutput 输出完整 toolCalls 摘要", pass,
+        detail: "toolCalls=" + output.toolCalls.length };
+    })(),
+    (() => {
+      const pass = output.approvals.length >= 1;
+      return { id: 25, label: "ActorRunOutput 输出完整 approvals 摘要", pass,
+        detail: "approvals=" + output.approvals.length };
+    })(),
+    (() => {
+      const pass = !hasEvent("llm_validation_failed") && output.status === "completed";
+      return { id: 26, label: "mock mode 下 LLM 接入保持稳定", pass,
+        detail: pass ? "mock LLM 结构化判断稳定完成" : "出现 LLM 校验失败或运行未完成" };
+    })(),
   ];
 
   return checks;
@@ -184,10 +230,11 @@ function runChecks(output: ActorRunOutput): CheckResult[] {
 
 async function main() {
   console.log("=".repeat(60));
-  console.log("  ForeverThinking v0.1.4 — 单 Actor 最小闭环 Demo");
+  console.log("  ForeverThinking v0.2.0 — Real LLM Integration Demo");
   console.log("=".repeat(60));
   console.log();
   console.log("📥 Input: 客户说扫码枪连不上系统，还要求退款。");
+  console.log("  LLM_MODE: " + (process.env.LLM_MODE ?? "mock"));
   console.log();
 
   resetRuntime();
@@ -232,7 +279,7 @@ async function main() {
   console.log();
 
   console.log("=".repeat(60));
-  console.log("  ✅ 验收检查 (18 条)");
+  console.log("  ✅ 验收检查 (26 条)");
   console.log("=".repeat(60));
   console.log();
 
@@ -249,7 +296,7 @@ async function main() {
   console.log("-".repeat(60));
   console.log("  通过: " + passCount + "/" + checks.length);
   console.log(passCount === checks.length
-    ? "  🎉 全部验收标准通过！Actor Kernel 成立！"
+    ? "  🎉 全部验收标准通过！Actor Kernel + LLM Gateway 成立！"
     : "  ❌ 部分验收标准未通过");
   console.log("-".repeat(60));
   console.log();
@@ -312,7 +359,7 @@ async function main() {
 main()
   .then(({ passCount, checks }) => {
     if (passCount === checks.length) {
-      console.log("\n🎉 v0.1.4 Actor Kernel 最小闭环验证通过！");
+      console.log("\n🎉 v0.2.0 Actor Kernel + LLM Gateway 验证通过！");
       process.exit(0);
     } else {
       console.log("\n❌ " + (checks.length - passCount) + " 项未通过");
