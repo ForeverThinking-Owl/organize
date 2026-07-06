@@ -1,6 +1,6 @@
 // ============================================================================
 // ActorDecisionEngine — Actor 决策引擎
-// v0.1.3: decide() 接受可选的 prebuiltRequest，ToolCallDecision 携带完整 arguments
+// v0.2.0: llm_judge 结果来源改为 LLMGateway，默认 mock，可切换 real
 // ============================================================================
 
 import {
@@ -13,37 +13,84 @@ import { ActorContext } from "../core/types/actor";
 import { ToolCallRequest } from "../core/types/tool";
 import { SkillState } from "./skill-runtime";
 import { traceLogger } from "../trace/trace-logger";
+import { llmGateway } from "../llm/llm-gateway";
+import { buildActorJudgePrompt } from "../llm/prompts/actor-judge.prompt";
 
-/**
- * Mock LLM 判断逻辑（纯函数，可独立测试）
- */
-export function mockLLMJudge(
-  _instruction: string,
-  context: ActorContext,
-  state: SkillState
-): Record<string, unknown> {
-  const inputText = (context.input.text ?? "").toLowerCase();
-  const orderInfo = (state.steps["query_order"] as Record<string, unknown>) ?? {};
-  const ticketHistory = (state.steps["query_history"] as Record<string, unknown>) ?? {};
+export const DEFAULT_TRIAGE_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  required: ["need_after_sales", "need_technical", "need_finance", "should_create_ticket", "reason"],
+  properties: {
+    analysis: { type: "object" },
+    need_after_sales: { type: "boolean" },
+    need_technical: { type: "boolean" },
+    need_finance: { type: "boolean" },
+    should_create_ticket: { type: "boolean" },
+    reason: { type: "string" },
+    risk_level: { type: "string", enum: ["low", "medium", "high"] },
+  },
+};
 
-  const hasRefund = /退款/.test(inputText);
-  const hasConnection = /连不上|连接|无法连接|蓝牙|网络/.test(inputText);
-  const hasScanner = /扫码枪|扫描枪|scanner/.test(inputText);
-
+function safeFallbackJudgeResult(reason: string): Record<string, unknown> {
   return {
-    analysis: { hasRefund, hasConnection, hasScanner, orderInfo, ticketHistory },
-    need_after_sales: hasRefund,
-    need_technical: hasConnection,
-    need_finance: hasRefund,
-    should_create_ticket: hasConnection || hasRefund,
-    reason: [
-      hasRefund ? "客户要求退款，需要售后和财务处理" : "",
-      hasConnection ? "设备连接问题，需要技术排查" : "",
-    ].filter(Boolean).join("；"),
+    analysis: { fallback: true, reason },
+    need_after_sales: true,
+    need_technical: true,
+    need_finance: true,
+    should_create_ticket: true,
+    reason: `LLM 判断失败，采用保守策略：${reason}`,
+    risk_level: "medium",
   };
 }
 
 export class ActorDecisionEngine {
+  async generateJudgeResult(input: {
+    step: LLMJudgeStep;
+    context: ActorContext;
+    state: SkillState;
+    actorRunId: string;
+  }): Promise<Record<string, unknown>> {
+    const { step, context, state, actorRunId } = input;
+    const schema = step.outputSchema ?? DEFAULT_TRIAGE_OUTPUT_SCHEMA;
+    const taskName = `${state.skillId}.${step.stepKey}`;
+    const { systemPrompt, userPrompt } = buildActorJudgePrompt({ context, state, step, schema });
+
+    traceLogger.record(actorRunId, "llm_call_start", {
+      taskName,
+      stepKey: step.stepKey,
+      schemaName: "llm_judge_output",
+    });
+
+    try {
+      const output = await llmGateway.generateStructured<Record<string, unknown>>({
+        taskName,
+        systemPrompt,
+        userPrompt,
+        schema,
+        temperature: 0,
+        metadata: { context, state, stepKey: step.stepKey },
+      });
+
+      traceLogger.record(actorRunId, "llm_call_end", {
+        taskName,
+        stepKey: step.stepKey,
+        model: output.model,
+        latencyMs: output.latencyMs,
+        usage: output.usage,
+        valid: true,
+      });
+
+      return output.data;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      traceLogger.record(actorRunId, "llm_validation_failed", {
+        taskName,
+        stepKey: step.stepKey,
+        error: message,
+      });
+      return safeFallbackJudgeResult(message);
+    }
+  }
+
   /**
    * @param prebuiltRequest 当 step.type === "tool_call" 时，已解析好 arguments 的请求
    */
