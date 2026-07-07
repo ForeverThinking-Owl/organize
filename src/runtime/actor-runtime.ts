@@ -18,7 +18,7 @@ import {
   EndStep,
 } from "../core/types/skill";
 import { ToolCallRequest } from "../core/types/tool";
-import { ApprovalDecision } from "../core/types/approval";
+import type { ApprovalDecision, ApprovalRequest } from "../core/types/approval";
 import type { MemoryStore } from "../memory/memory-store";
 import { actorContextBuilder } from "./actor-context-builder";
 import { skillRuntime, SkillState, buildToolCallRequest } from "./skill-runtime";
@@ -525,17 +525,26 @@ export class ActorRuntime {
   }
 
   private buildPendingApprovalOutput(
-    pendingApproval: import("../core/types/approval").ApprovalRequest | SkillApprovalRequest
+    pendingApproval: ApprovalRequest | SkillApprovalRequest
   ): PendingApprovalOutput {
-    if ("approvalKind" in pendingApproval && pendingApproval.approvalKind === "skill_step") {
-      return pendingApproval;
+    const maybeSkillApproval = pendingApproval as Partial<SkillApprovalRequest>;
+    if (maybeSkillApproval.approvalKind === "skill_step") {
+      const skillApproval = pendingApproval as SkillApprovalRequest;
+      return {
+        approvalKind: "skill_step",
+        approvalRequestId: skillApproval.approvalRequestId,
+        stepKey: skillApproval.stepKey,
+        outputKey: skillApproval.outputKey,
+        reason: skillApproval.reason,
+      };
     }
 
+    const toolApproval = pendingApproval as ApprovalRequest;
     return {
       approvalKind: "tool_call",
-      approvalRequestId: pendingApproval.approvalRequestId,
-      toolName: pendingApproval.toolName,
-      reason: pendingApproval.reason,
+      approvalRequestId: toolApproval.approvalRequestId,
+      toolName: toolApproval.toolName,
+      reason: toolApproval.reason,
     };
   }
 
@@ -543,7 +552,7 @@ export class ActorRuntime {
     actorRunId: string,
     status: ActorRunStatus,
     result: Record<string, unknown> | null,
-    pendingApproval?: import("../core/types/approval").ApprovalRequest | SkillApprovalRequest,
+    pendingApproval?: ApprovalRequest | SkillApprovalRequest,
     memoryCandidates?: Array<{ candidateId: string; scope: string; type: string; content: string; confidence?: number }>,
     pendingHumanInput?: HumanInputRequest
   ): ActorRunOutput {
