@@ -1,6 +1,6 @@
 // ============================================================================
 // ActorRuntime — Actor Kernel 主执行器
-// v0.3.0: ActorContextBuilder 接入 Hybrid Memory；MemoryCandidate 自动进入 MemoryPolicy
+// v0.3.2: ActorContextBuilder 接入 Hybrid Memory；记录 Memory 写入观测摘要
 // ============================================================================
 
 import { ActorConfig } from "../core/types/actor";
@@ -248,7 +248,7 @@ export class ActorRuntime {
       skillRuntime.advanceStep(state);
     }
 
-    const memoryCandidates = memoryService.generateCandidates(actorRunId, actorId, {
+    const memoryGeneration = memoryService.generateCandidatesWithSummary(actorRunId, actorId, {
       organizationId: context.actor.organizationId,
       unitId: context.actor.unitId,
       sceneId: context.runtimeContext.scene_id as string | undefined,
@@ -257,6 +257,7 @@ export class ActorRuntime {
       actorMemory: context.memory.actorPrivate,
       approvalJudgment: context.approvalJudgment,
     });
+    const memoryCandidates = memoryGeneration.candidates;
 
     for (const c of memoryCandidates) {
       traceLogger.record(actorRunId, "memory_candidate_generated", {
@@ -272,6 +273,8 @@ export class ActorRuntime {
         });
       }
     }
+
+    traceLogger.record(actorRunId, "memory_write_summary", memoryGeneration.summary as unknown as Record<string, unknown>);
 
     const endStatus = state.status === "waiting_approval" ? "waiting_approval"
       : state.status === "completed" ? "completed" : "error";
