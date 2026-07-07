@@ -1,6 +1,6 @@
 // ============================================================================
 // ActorDecisionEngine — Actor 决策引擎
-// v0.2.0: llm_judge 结果来源改为 LLMGateway，默认 mock，可切换 real
+// v0.3.5: return 支持 outputMapping，未知步骤类型显式失败
 // ============================================================================
 
 import {
@@ -11,7 +11,7 @@ import {
 import { SkillStep, ToolCallStep, LLMJudgeStep, ReturnStep } from "../core/types/skill";
 import { ActorContext } from "../core/types/actor";
 import { ToolCallRequest } from "../core/types/tool";
-import { SkillState } from "./skill-runtime";
+import { SkillState, resolveTemplateValue } from "./skill-runtime";
 import { traceLogger } from "../trace/trace-logger";
 import { llmGateway } from "../llm/llm-gateway";
 import { buildActorJudgePrompt } from "../llm/prompts/actor-judge.prompt";
@@ -112,11 +112,7 @@ export class ActorDecisionEngine {
         return this.decideReturn(step as ReturnStep, state, actorRunId);
 
       default:
-        return {
-          decisionType: "final_output",
-          reasoningSummary: `步骤类型 ${step.type} 无需生成决策`,
-          result: {},
-        };
+        throw new Error(`Unsupported decision step type: ${step.type}`);
     }
   }
 
@@ -205,27 +201,38 @@ export class ActorDecisionEngine {
   }
 
   private decideReturn(
-    _step: ReturnStep,
+    step: ReturnStep,
     state: SkillState,
     actorRunId: string
   ): FinalOutputDecision {
-    const result: Record<string, unknown> = {
-      summary: "客户问题分流完成",
-      triage: state.steps["judge"] ?? {},
-      order_info: state.steps["query_order"] ?? {},
-      ticket_history: state.steps["query_history"] ?? {},
-      create_ticket_result: state.outputs["create_ticket_result"] ?? null,
-      observations_count: state.observations.length,
-    };
+    const result: Record<string, unknown> = {};
+
+    if (step.outputMapping && Object.keys(step.outputMapping).length > 0) {
+      for (const [key, template] of Object.entries(step.outputMapping)) {
+        result[key] = resolveTemplateValue(template, state);
+      }
+    } else {
+      Object.assign(result, {
+        summary: "客户问题分流完成",
+        triage: state.steps["judge"] ?? {},
+        order_info: state.steps["query_order"] ?? {},
+        ticket_history: state.steps["query_history"] ?? {},
+        create_ticket_result: state.outputs["create_ticket_result"] ?? null,
+        observations_count: state.observations.length,
+      });
+    }
 
     traceLogger.record(actorRunId, "decision_generated", {
-      stepKey: _step.stepKey,
+      stepKey: step.stepKey,
       decisionType: "final_output",
+      outputMapping: step.outputMapping ? Object.keys(step.outputMapping) : undefined,
     });
 
     return {
       decisionType: "final_output",
-      reasoningSummary: "Skill 所有步骤执行完成，输出汇总结果",
+      reasoningSummary: step.outputMapping
+        ? "Skill return 使用 outputMapping 生成最终输出"
+        : "Skill 所有步骤执行完成，输出汇总结果",
       result,
     };
   }
