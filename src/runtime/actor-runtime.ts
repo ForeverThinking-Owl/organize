@@ -1,6 +1,6 @@
 // ============================================================================
 // ActorRuntime — Actor Kernel 主执行器
-// v0.3.6: Runtime 可选绑定 MemoryStore，运行前 load，运行后 save
+// v0.3.8: human_input 支持 waiting / continue 运行语义
 // ============================================================================
 
 import { ActorConfig } from "../core/types/actor";
@@ -27,6 +27,12 @@ import { actorDecisionExecutor } from "./actor-decision-executor";
 import { memoryService } from "../memory/memory-service";
 import { traceLogger } from "../trace/trace-logger";
 import { loadRuntimeMemoryStore, saveRuntimeMemoryStore } from "./runtime-memory-store";
+import {
+  applyHumanInputResponse,
+  buildHumanInputRequest,
+  type HumanInputRequest,
+  type HumanInputResponse,
+} from "./human-input-runtime";
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -45,15 +51,18 @@ export interface ActorRunInput {
   runtimeOptions?: ActorRuntimeOptions;
 }
 
+export type ActorRunStatus = "completed" | "waiting_approval" | "waiting_human_input" | "error";
+
 export interface ActorRunOutput {
   actorRunId: string;
-  status: "completed" | "waiting_approval" | "error";
+  status: ActorRunStatus;
   result: Record<string, unknown> | null;
   pendingApproval?: {
     approvalRequestId: string;
     toolName: string;
     reason: string;
   };
+  pendingHumanInput?: HumanInputRequest;
   toolCalls: Array<{
     toolCallId: string;
     toolName: string;
@@ -77,6 +86,10 @@ export interface ActorRunOutput {
     events: Array<{ type: string; stepKey?: string }>;
   };
 }
+
+export type ActorContinueEvent =
+  | { type: "approval_decision"; decision: ApprovalDecision }
+  | { type: "human_input_response"; response: HumanInputResponse };
 
 let runCounter = 0;
 
@@ -214,6 +227,7 @@ export class ActorRuntime {
     skill: Skill; state: SkillState;
     context: ReturnType<typeof actorContextBuilder.build>;
     memoryStore?: MemoryStore;
+    pendingHumanInput?: HumanInputRequest;
   }> = new Map();
 
   async run(input: ActorRunInput): Promise<ActorRunOutput> {
@@ -271,7 +285,7 @@ export class ActorRuntime {
 
   async continue(
     actorRunId: string,
-    event: { type: "approval_decision"; decision: ApprovalDecision }
+    event: ActorContinueEvent
   ): Promise<ActorRunOutput> {
     const saved = this.runs.get(actorRunId);
     if (!saved) {
@@ -294,6 +308,27 @@ export class ActorRuntime {
         skillRuntime.advanceStep(state);
         return await this.executeLoop(actorRunId, actorId, context, state, skill, memoryStore);
       }
+    }
+
+    if (event.type === "human_input_response") {
+      const pending = saved.pendingHumanInput;
+      if (!pending || pending.humanInputRequestId !== event.response.humanInputRequestId) {
+        const message = pending
+          ? `Human input response id mismatch: ${event.response.humanInputRequestId}`
+          : `No pending human input for ${actorRunId}`;
+        traceLogger.record(actorRunId, "error", { message });
+        state.status = "error";
+        traceLogger.endRun(actorRunId, "error");
+        actorDecisionExecutor.removeRun(actorRunId);
+        this.runs.delete(actorRunId);
+        return this.buildOutput(actorRunId, "error", null);
+      }
+
+      applyHumanInputResponse(pending, event.response, state, actorRunId);
+      saved.pendingHumanInput = undefined;
+      state.status = "running";
+      skillRuntime.advanceStep(state);
+      return await this.executeLoop(actorRunId, actorId, context, state, skill, memoryStore);
     }
 
     return await this.executeLoop(actorRunId, actorId, context, state, skill, memoryStore);
@@ -321,7 +356,16 @@ export class ActorRuntime {
         continue;
       }
 
-      if (step.type === "human_input" || step.type === "wait_approval" || step.type === "end") {
+      if (step.type === "human_input") {
+        const request = buildHumanInputRequest(step as HumanInputStep, actorRunId);
+        const saved = this.runs.get(actorRunId);
+        if (saved) saved.pendingHumanInput = request;
+        state.status = "waiting_human_input";
+        traceLogger.endRun(actorRunId, "waiting_human_input");
+        return this.buildOutput(actorRunId, "waiting_human_input", null, undefined, undefined, request);
+      }
+
+      if (step.type === "wait_approval" || step.type === "end") {
         const message = `Unsupported runtime skill step type: ${step.type}`;
         traceLogger.record(actorRunId, "error", { message, stepKey: step.stepKey });
         state.status = "error";
@@ -417,22 +461,24 @@ export class ActorRuntime {
       state.status = "error";
     }
 
-    const endStatus = state.status === "waiting_approval" ? "waiting_approval"
+    const endStatus: ActorRunStatus = state.status === "waiting_approval" ? "waiting_approval"
+      : state.status === "waiting_human_input" ? "waiting_human_input"
       : state.status === "completed" ? "completed" : "error";
     traceLogger.endRun(actorRunId, endStatus);
 
     actorDecisionExecutor.removeRun(actorRunId);
     this.runs.delete(actorRunId);
 
-    return this.buildOutput(actorRunId, endStatus as "completed" | "waiting_approval" | "error", finalResult, undefined, memoryCandidates);
+    return this.buildOutput(actorRunId, endStatus, finalResult, undefined, memoryCandidates);
   }
 
   private buildOutput(
     actorRunId: string,
-    status: "completed" | "waiting_approval" | "error",
+    status: ActorRunStatus,
     result: Record<string, unknown> | null,
     pendingApproval?: import("../core/types/approval").ApprovalRequest,
-    memoryCandidates?: Array<{ candidateId: string; scope: string; type: string; content: string; confidence?: number }>
+    memoryCandidates?: Array<{ candidateId: string; scope: string; type: string; content: string; confidence?: number }>,
+    pendingHumanInput?: HumanInputRequest
   ): ActorRunOutput {
     const trace = traceLogger.getTrace(actorRunId)!;
 
@@ -470,6 +516,7 @@ export class ActorRuntime {
         toolName: pendingApproval.toolName,
         reason: pendingApproval.reason,
       } : undefined,
+      pendingHumanInput,
       toolCalls,
       approvals,
       memoryCandidates: memoryCandidates ?? [],

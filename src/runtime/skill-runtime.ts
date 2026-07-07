@@ -1,7 +1,7 @@
 // ============================================================================
 // SkillRuntime — Skill 执行器
 // 按步骤执行 Skill，管理步骤间的输入输出映射
-// v0.3.5: 模板解析支持 context / steps / outputs，保留原始值用于 return output_mapping
+// v0.3.8: SkillState 支持 waiting_human_input
 // ============================================================================
 
 import {
@@ -24,7 +24,7 @@ export interface SkillState {
   outputs: Record<string, unknown>;
   /** 可引用的上下文变量 */
   context: Record<string, unknown>;
-  status: "running" | "completed" | "waiting_approval" | "error";
+  status: "running" | "completed" | "waiting_approval" | "waiting_human_input" | "error";
   observations: ToolObservation[];
 }
 

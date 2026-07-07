@@ -8,14 +8,14 @@ README is the project entry point. Version history, verification coverage, and r
 
 ## Current State / 当前状态
 
-Current version: `v0.3.7 — Trace Persistence`
+Current version: `v0.3.8 — Human Input Runtime Semantics`
 
-当前版本：`v0.3.7 — Trace Persistence`
+当前版本：`v0.3.8 — Human Input Runtime Semantics`
 
 | Boundary / 边界 | Status / 状态 |
 |---|---|
-| Actor Kernel | Single-Actor loop supports ToolCall, approval, continue, Trace, memory crystallization, stricter Skill semantics, optional store-backed runs, and persistent Trace snapshots. / 单 Actor 闭环已支持 ToolCall、审批、continue、Trace、记忆沉淀、更严格的 Skill 语义、可选 Store-backed run 与 Trace 快照持久化。 |
-| Skill Runtime | Strict step parsing, first-class transform execution, return output mapping, and explicit unsupported-step errors are available. / 已支持严格 step 解析、transform 一等执行、return output mapping、未支持步骤显式报错。 |
+| Actor Kernel | Single-Actor loop supports ToolCall, approval, continue, Trace, memory crystallization, stricter Skill semantics, optional store-backed runs, persistent Trace snapshots, and human input waiting / resume. / 单 Actor 闭环已支持 ToolCall、审批、continue、Trace、记忆沉淀、更严格的 Skill 语义、可选 Store-backed run、Trace 快照持久化与 human input 等待 / 恢复。 |
+| Skill Runtime | Strict step parsing, first-class transform execution, human_input waiting semantics, return output mapping, and explicit unsupported-step errors are available. / 已支持严格 step 解析、transform 一等执行、human_input 等待语义、return output mapping、未支持步骤显式报错。 |
 | LLM Gateway | Supports mock / real structured-output mode. / 支持 mock / real 结构化输出模式。 |
 | Policy / Approval | Tool permission, autonomy level, and before_call approval are wired in. / Tool 权限、自主等级、before_call 审批已接入。 |
 | Hybrid Memory | Candidate, record, policy, extraction, retrieval, and view are wired in. / 候选、记录、策略、提取、检索与视图已接入。 |
@@ -24,6 +24,7 @@ Current version: `v0.3.7 — Trace Persistence`
 | Memory Persistence | JSON snapshot dump / restore is verified. / JSON 快照 dump / restore 已验证。 |
 | Memory Store | `MemoryStore`, `JsonMemoryStore`, and Runtime Store Binding are verified. / `MemoryStore`、`JsonMemoryStore` 与 Runtime Store Binding 已验证。 |
 | Trace Persistence | `TraceSnapshot`, `TraceStore`, `JsonTraceStore`, and TraceLogger dump / restore are verified. / `TraceSnapshot`、`TraceStore`、`JsonTraceStore` 与 TraceLogger dump / restore 已验证。 |
+| Human Input | `human_input` can pause a run, return `pendingHumanInput`, resume through `continue()`, and feed later steps through `steps` / `outputs`. / `human_input` 可暂停运行、返回 `pendingHumanInput`、通过 `continue()` 恢复，并通过 `steps` / `outputs` 供后续步骤读取。 |
 
 ## Verification Matrix / 验收矩阵
 
@@ -38,28 +39,59 @@ Current version: `v0.3.7 — Trace Persistence`
 | `npm run demo:skill` | Skill Runtime Semantics demo, 10 checks / Skill Runtime 语义 Demo，10 条验收 |
 | `npm run demo:runtime:store` | Runtime Store Binding demo, 10 checks / Runtime Store Binding Demo，10 条验收 |
 | `npm run demo:trace:persistence` | Trace Persistence demo, 10 checks / Trace Persistence Demo，10 条验收 |
+| `npm run demo:human:input` | Human Input Runtime demo, 10 checks / Human Input Runtime Demo，10 条验收 |
 
 ---
 
-## Planned: v0.3.8 — Human Input Runtime Semantics
+## Planned: v0.3.9 — Wait Approval Runtime Semantics
 
-Goal: give `human_input` and explicit waiting steps a real runtime contract instead of only parsing them and failing as unsupported.
+Goal: decide whether explicit `wait_approval` should become a first-class Skill waiting step or remain represented by ToolCall approval.
 
-目标：让 `human_input` 与显式等待步骤拥有真实运行时契约，而不是只被解析后以 unsupported 失败。
+目标：明确显式 `wait_approval` 是否成为一等 Skill 等待步骤，还是继续只由 ToolCall approval 表达。
 
 Possible scope / 可能范围：
 
-- Define `human_input` waiting output shape and continue event payload.
-- Add Trace events for human input requested / received.
-- Preserve approval-specific continue behavior while adding a general waiting boundary.
-- Add a human input runtime demo and keep all existing demos green.
+- Define explicit `wait_approval` runtime contract or deprecate it from executable Skill steps.
+- Align approval waiting output shape with `waiting_human_input` where appropriate.
+- Add regression coverage for approval continue plus human input continue in the same runtime.
+- Keep all existing demos green.
 
 中文可能范围：
 
-- 定义 `human_input` 等待输出结构和 continue event payload。
-- 新增 human input requested / received Trace 事件。
-- 保留审批专用 continue 行为，同时增加更通用的等待边界。
-- 新增 human input runtime demo，并保持现有 demos 全部通过。
+- 定义显式 `wait_approval` 运行时契约，或从可执行 Skill steps 中明确弃用。
+- 在合适范围内让 approval waiting 输出结构与 `waiting_human_input` 对齐。
+- 增加 approval continue 与 human input continue 在同一 Runtime 下的回归覆盖。
+- 保持现有 demos 全部通过。
+
+---
+
+## v0.3.8 — Human Input Runtime Semantics
+
+- Added `waiting_human_input` to ActorRunOutput / ActorRunTrace / SkillState status unions.
+- Added `pendingHumanInput` output shape with request id, step key, prompt, and output key.
+- Added `human_input_response` continue event payload.
+- Added Human Input Runtime helpers to build requests and apply responses.
+- ActorRuntime now pauses at `human_input` and resumes after `continue()`.
+- Human responses are written into `state.steps[stepKey]` and `state.outputs[outputKey]`.
+- Added `human_input_requested` and `human_input_received` Trace events.
+- Trace records human input metadata but does not store the full response value by default.
+- Added `demo:human:input` with 10 checks.
+- Added Human Input Runtime Demo to CI.
+- Updated README and package metadata to v0.3.8.
+
+中文：
+
+- `ActorRunOutput` / `ActorRunTrace` / `SkillState` 状态联合新增 `waiting_human_input`。
+- 新增 `pendingHumanInput` 输出结构，包含 request id、step key、prompt、output key。
+- 新增 `human_input_response` continue 事件 payload。
+- 新增 Human Input Runtime helper，用于创建请求与写入响应。
+- ActorRuntime 执行到 `human_input` 时会暂停，并在 `continue()` 后恢复。
+- 人工输入会写入 `state.steps[stepKey]` 与 `state.outputs[outputKey]`。
+- 新增 `human_input_requested` 与 `human_input_received` Trace 事件。
+- Trace 默认只记录人工输入元数据，不保存完整 response value。
+- 新增 `demo:human:input`，包含 10 条验收。
+- CI 增加 Human Input Runtime Demo。
+- README 与 package 元数据对齐到 v0.3.8。
 
 ---
 
