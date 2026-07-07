@@ -1,6 +1,6 @@
 // ============================================================================
-// hybrid-memory.demo.ts — v0.3.0
-// 验证混合记忆最小闭环：第一次运行沉淀记忆，第二次运行检索记忆
+// hybrid-memory.demo.ts — v0.3.1
+// 验证混合记忆硬化：去重、稳定检索、Trace 摘要、重复实践不重复写入
 // ============================================================================
 
 import { actorRuntime, ActorRunOutput } from "../runtime/actor-runtime";
@@ -13,6 +13,7 @@ import {
 import { traceLogger } from "../trace/trace-logger";
 import { memoryService } from "../memory/memory-service";
 import { approvalGate } from "../approvals/approval-gate";
+import { MemoryRecord } from "../core/types/memory";
 
 const ACTOR_CONFIG = {
   actor_id: "customer_service_actor", organization_id: "org_001",
@@ -86,10 +87,13 @@ async function approveIfNeeded(output: ActorRunOutput): Promise<ActorRunOutput> 
   });
 }
 
-function memoryRetrievedCount(actorRunId: string): number {
+function memoryRetrievedEvent(actorRunId: string) {
   const trace = traceLogger.getTrace(actorRunId)!;
-  const event = trace.events.find((e) => e.eventType === "memory_retrieved");
-  return event?.data.count as number ?? 0;
+  return trace.events.find((e) => e.eventType === "memory_retrieved");
+}
+
+function memoryRetrievedCount(actorRunId: string): number {
+  return memoryRetrievedEvent(actorRunId)?.data.count as number ?? 0;
 }
 
 function hasEvent(actorRunId: string, eventType: string): boolean {
@@ -97,9 +101,45 @@ function hasEvent(actorRunId: string, eventType: string): boolean {
   return trace.events.some((e) => e.eventType === eventType);
 }
 
+function normalize(content: string): string {
+  return content.trim().toLowerCase().replace(/\s+/g, "").replace(/[，。、“”‘’；：,.!！?？]/g, "");
+}
+
+function memoryKey(memory: MemoryRecord): string {
+  return [
+    memory.organizationId,
+    memory.unitId ?? "",
+    memory.actorId ?? "",
+    memory.scope,
+    memory.type,
+    normalize(memory.content),
+  ].join("|");
+}
+
+function hasDuplicateMemories(memories: MemoryRecord[]): boolean {
+  const seen = new Set<string>();
+  for (const memory of memories) {
+    const key = memoryKey(memory);
+    if (seen.has(key)) return true;
+    seen.add(key);
+  }
+  return false;
+}
+
+async function runPractice(inputText: string, orderId: string): Promise<ActorRunOutput> {
+  let output = await actorRuntime.run({
+    actorConfig: ACTOR_CONFIG,
+    skillConfig: SKILL_CONFIG,
+    input: { text: inputText },
+    runtimeContext: { order_id: orderId, customer_id: "C001" },
+  });
+  output = await approveIfNeeded(output);
+  return output;
+}
+
 async function main() {
   console.log("=".repeat(60));
-  console.log("  ForeverThinking v0.3.0 — Hybrid Memory Demo");
+  console.log("  ForeverThinking v0.3.1 — Hybrid Memory Hardening Demo");
   console.log("=".repeat(60));
   console.log();
 
@@ -109,13 +149,7 @@ async function main() {
   registerTools();
 
   console.log("🚀 第一次运行：生成并写入实践记忆");
-  let first = await actorRuntime.run({
-    actorConfig: ACTOR_CONFIG,
-    skillConfig: SKILL_CONFIG,
-    input: { text: "客户说扫码枪连不上系统，还要求退款。" },
-    runtimeContext: { order_id: "ORDER_10086", customer_id: "C001" },
-  });
-  first = await approveIfNeeded(first);
+  const first = await runPractice("客户说扫码枪连不上系统，还要求退款。", "ORDER_10086");
 
   const memoriesAfterFirst = memoryService.getAllMemories();
   const acceptedCount = memoriesAfterFirst.filter((m) => m.sourceRunId === first.actorRunId).length;
@@ -126,16 +160,29 @@ async function main() {
   console.log();
 
   console.log("🔁 第二次运行：检索第一次沉淀的经验");
-  let second = await actorRuntime.run({
-    actorConfig: ACTOR_CONFIG,
-    skillConfig: SKILL_CONFIG,
-    input: { text: "客户说扫描枪又连不上了。" },
-    runtimeContext: { order_id: "ORDER_10087", customer_id: "C001" },
-  });
-  second = await approveIfNeeded(second);
+  const second = await runPractice("客户说扫描枪又连不上了。", "ORDER_10087");
 
+  const memoriesAfterSecond = memoryService.getAllMemories();
   const firstRetrieved = memoryRetrievedCount(first.actorRunId);
   const secondRetrieved = memoryRetrievedCount(second.actorRunId);
+  console.log("  Status: " + second.status);
+  console.log("  RetrievedMemoryCount: " + secondRetrieved);
+  console.log("  TotalMemories: " + memoriesAfterSecond.length);
+  console.log();
+
+  console.log("🔂 第三次运行：重复第一次实践，验证去重");
+  const beforeThirdCount = memoryService.getAllMemories().length;
+  const third = await runPractice("客户说扫码枪连不上系统，还要求退款。", "ORDER_10086");
+  const afterThirdMemories = memoryService.getAllMemories();
+  const afterThirdCount = afterThirdMemories.length;
+  console.log("  Status: " + third.status);
+  console.log("  BeforeThirdMemories: " + beforeThirdCount);
+  console.log("  AfterThirdMemories: " + afterThirdCount);
+  console.log();
+
+  const secondRetrievedEvent = memoryRetrievedEvent(second.actorRunId);
+  const secondSummaries = (secondRetrievedEvent?.data.summaries as unknown[] | undefined) ?? [];
+  const stats = memoryService.getStats();
 
   const checks = [
     {
@@ -164,14 +211,34 @@ async function main() {
       detail: "first=" + firstRetrieved + ", second=" + secondRetrieved,
     },
     {
-      label: "第二次运行保持 Actor Kernel 完成状态",
-      pass: second.status === "completed",
-      detail: "Status=" + second.status,
+      label: "memory_retrieved Trace 包含摘要",
+      pass: secondSummaries.length === secondRetrieved && secondSummaries.length > 0,
+      detail: "summaries=" + secondSummaries.length,
+    },
+    {
+      label: "MemoryRecord 无重复 key",
+      pass: !hasDuplicateMemories(afterThirdMemories),
+      detail: hasDuplicateMemories(afterThirdMemories) ? "存在重复记忆" : "无重复记忆",
+    },
+    {
+      label: "重复实践不会重复写入同一批记忆",
+      pass: afterThirdCount === beforeThirdCount,
+      detail: "before=" + beforeThirdCount + ", after=" + afterThirdCount,
+    },
+    {
+      label: "MemoryService 统计信息稳定",
+      pass: stats.memoryCount === afterThirdCount && stats.activeMemoryCount === afterThirdCount,
+      detail: JSON.stringify(stats),
+    },
+    {
+      label: "第三次运行保持 Actor Kernel 完成状态",
+      pass: third.status === "completed",
+      detail: "Status=" + third.status,
     },
   ];
 
   console.log("=".repeat(60));
-  console.log("  ✅ Hybrid Memory 验收检查 (6 条)");
+  console.log("  ✅ Hybrid Memory Hardening 验收检查 (10 条)");
   console.log("=".repeat(60));
 
   let passCount = 0;
@@ -185,7 +252,7 @@ async function main() {
   console.log("-".repeat(60));
   console.log("  通过: " + passCount + "/" + checks.length);
   console.log(passCount === checks.length
-    ? "  🎉 Hybrid Memory 最小闭环验证通过！"
+    ? "  🎉 Hybrid Memory Hardening 验证通过！"
     : "  ❌ 部分验收标准未通过");
   console.log("-".repeat(60));
 
