@@ -27,10 +27,10 @@ AI 判断 5W1H（何时、何地、何事、何因、何人、如何）
 ## 当前版本
 
 ```text
-v0.3.0 — Hybrid Memory System
+v0.3.1 — Hybrid Memory Hardening
 ```
 
-v0.3.0 引入内存版混合记忆系统：MemoryRecord、MemoryCandidate、MemoryPolicy、MemoryExtractor、HybridMemoryView。Actor 不只完成一次实践，而能从实践中沉淀经验，并在下一次实践中读取经验。仍是内存版，不含向量检索或图记忆数据库。
+v0.3.1 加固内存版混合记忆流程：稳定 memory fingerprint、MemoryCandidate/MemoryRecord 写入去重、重复实践不产生重复记忆。仍是内存版，不含向量检索或图记忆数据库。
 
 ```bash
 npm run demo:memory    # 混合记忆闭环验证
@@ -88,10 +88,10 @@ Results crystallize as memory → next practice gets better
 ## Current Version
 
 ```text
-v0.2.1 — LLM Integration Hardening
+v0.3.1 — Hybrid Memory Hardening
 ```
 
-v0.2.1 hardens the LLM integration layer after v0.2.0 Real LLM Integration: CI, lightweight `.env` loading, LLM retry, and controlled fallback boundaries for structured-output failures. Actor Kernel boundaries remain unchanged. PolicyEngine, ApprovalGate, ToolGateway and MemoryService continue to operate outside the model boundary.
+v0.3.1 hardens the in-memory hybrid memory flow: stabilized memory fingerprints, MemoryCandidate/MemoryRecord write deduplication, and verified repeat practice runs do not create duplicate memories. Still in-memory only, no vector search or graph memory database.
 
 ## Quick Start
 

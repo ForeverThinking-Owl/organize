@@ -1,5 +1,5 @@
 // ============================================================================
-// customer-after-sales.demo.ts — v0.2.0
+// customer-after-sales.demo.ts — v0.3.1
 // 单 Actor 最小闭环 Demo
 //
 // 场景：客户说扫码枪连不上系统，还要求退款。
@@ -230,7 +230,7 @@ function runChecks(output: ActorRunOutput): CheckResult[] {
 
 async function main() {
   console.log("=".repeat(60));
-  console.log("  ForeverThinking v0.2.0 — Real LLM Integration Demo");
+  console.log("  ForeverThinking v0.3.1 — Hybrid Memory Hardening Demo");
   console.log("=".repeat(60));
   console.log();
   console.log("📥 Input: 客户说扫码枪连不上系统，还要求退款。");
@@ -359,7 +359,7 @@ async function main() {
 main()
   .then(({ passCount, checks }) => {
     if (passCount === checks.length) {
-      console.log("\n🎉 v0.2.0 Actor Kernel + LLM Gateway 验证通过！");
+      console.log("\n🎉 v0.3.1 Actor Kernel + Hybrid Memory 验证通过！");
       process.exit(0);
     } else {
       console.log("\n❌ " + (checks.length - passCount) + " 项未通过");

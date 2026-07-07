@@ -162,7 +162,10 @@ export class MemoryExtractor {
         sceneId: input.sceneId,
         scope: "actor_private",
         type: "run_summary",
-        content: `[${new Date().toISOString()}] ${input.finalResult.summary}: ${text}`,
+        // content must be deterministic — volatile metadata such as timestamps
+        // belongs in createdAt/updatedAt, not in content, because content
+        // participates in memoryFingerprint().
+        content: `${input.finalResult.summary}: ${text}`,
         structuredData: {
           summary: input.finalResult.summary,
           input: text,
