@@ -27,13 +27,14 @@ AI 判断 5W1H（何时、何地、何事、何因、何人、如何）
 ## 当前版本
 
 ```text
-v0.3.2 — Memory Observability
+v0.3.3 — Memory Persistence
 ```
 
-v0.3.2 在 v0.3.1 的混合记忆硬化基础上增加记忆写入观测：抽出共享 memory fingerprint 工具，记录 `memory_write_summary` Trace 事件，暴露 MemoryService 最近一次写入摘要，并在 CI 中加入 build 验证。仍是内存版，不含向量检索或图记忆数据库。
+v0.3.3 在 v0.3.2 的记忆观测基础上增加最小持久化能力：MemoryService 支持 `dumpSnapshot()` / `restoreSnapshot()`，新增本地 JSON MemorySnapshot 存储，恢复后重建 fingerprint 与计数器，并验证恢复后重复实践不会重复写入记忆。仍是内存版快照，不含向量检索或图记忆数据库。
 
 ```bash
-npm run demo:memory    # 记忆观测闭环验证
+npm run demo:memory                # 记忆观测闭环验证
+npm run demo:memory:persistence    # 记忆持久化闭环验证
 ```
 
 ## 快速开始
@@ -54,11 +55,13 @@ npm run demo:llm
 ## 工程脚本
 
 ```bash
-npm run demo        # 运行 Mock LLM Demo
-npm run demo:llm    # 运行真实 LLM Demo
-npm run typecheck   # TypeScript 类型检查
-npm run build       # 编译
-npm run start:dist  # 运行编译产物
+npm run demo                       # 运行 Mock LLM Demo
+npm run demo:llm                   # 运行真实 LLM Demo
+npm run demo:memory                # 运行记忆观测 Demo
+npm run demo:memory:persistence    # 运行记忆持久化 Demo
+npm run typecheck                  # TypeScript 类型检查
+npm run build                      # 编译
+npm run start:dist                 # 运行编译产物
 ```
 
 ---
@@ -88,10 +91,10 @@ Results crystallize as memory → next practice gets better
 ## Current Version
 
 ```text
-v0.3.2 — Memory Observability
+v0.3.3 — Memory Persistence
 ```
 
-v0.3.2 adds memory write observability on top of v0.3.1 hybrid memory hardening: shared memory fingerprint utilities, a `memory_write_summary` Trace event, the latest write summary in MemoryService stats, and build verification in CI. Still in-memory only, no vector search or graph memory database.
+v0.3.3 adds minimal persistence on top of v0.3.2 memory observability: MemoryService supports `dumpSnapshot()` / `restoreSnapshot()`, local JSON MemorySnapshot storage is available, fingerprints and counters are rebuilt after restore, and repeated practice runs after restore are verified not to write duplicate memories. Still snapshot-backed in-memory memory, no vector search or graph memory database.
 
 ## Quick Start
 
@@ -111,9 +114,11 @@ npm run demo:llm
 ## Scripts
 
 ```bash
-npm run demo        # Run mock LLM demo
-npm run demo:llm    # Run real LLM demo
-npm run typecheck   # TypeScript type-check
-npm run build       # Compile
-npm run start:dist  # Run compiled output
+npm run demo                       # Run mock LLM demo
+npm run demo:llm                   # Run real LLM demo
+npm run demo:memory                # Run memory observability demo
+npm run demo:memory:persistence    # Run memory persistence demo
+npm run typecheck                  # TypeScript type-check
+npm run build                      # Compile
+npm run start:dist                 # Run compiled output
 ```
