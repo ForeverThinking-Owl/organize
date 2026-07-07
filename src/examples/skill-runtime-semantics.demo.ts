@@ -117,6 +117,20 @@ function hasStepEvent(output: ActorRunOutput, eventType: string, stepKey: string
   return traceEvents(output).some((event) => event.eventType === eventType && event.stepKey === stepKey);
 }
 
+async function approveIfNeeded(output: ActorRunOutput): Promise<ActorRunOutput> {
+  if (output.status !== "waiting_approval" || !output.pendingApproval) return output;
+  return actorRuntime.continue(output.actorRunId, {
+    type: "approval_decision",
+    decision: {
+      approvalRequestId: output.pendingApproval.approvalRequestId,
+      decision: "approve",
+      comment: "Skill Runtime Semantics Demo 自动审批通过",
+      decidedBy: "skill_runtime_demo_approver",
+      decidedAt: new Date().toISOString(),
+    },
+  });
+}
+
 async function main() {
   console.log("=".repeat(60));
   console.log("  ForeverThinking v0.3.5 — Skill Runtime Semantics Demo");
@@ -126,12 +140,13 @@ async function main() {
   resetRuntime();
 
   console.log("🚀 运行合法 Skill：tool_call → llm_judge → transform → return(output_mapping)");
-  const output = await actorRuntime.run({
+  let output = await actorRuntime.run({
     actorConfig: ACTOR_CONFIG,
     skillConfig: SKILL_CONFIG,
-    input: { text: "客户想查询订单状态。" },
+    input: { text: "客户说扫码枪连不上系统。" },
     runtimeContext: { order_id: "ORDER_10086", customer_id: "C001" },
   });
+  output = await approveIfNeeded(output);
 
   console.log("  Status: " + output.status);
   console.log("  Result: " + JSON.stringify(output.result));
@@ -186,17 +201,17 @@ async function main() {
     },
     {
       label: "output_mapping 可保留 outputs 对象值",
-      pass: typeof triage === "object" && triage?.should_create_ticket === false,
+      pass: typeof triage === "object" && triage?.should_create_ticket === true,
       detail: "triage=" + JSON.stringify(triage),
     },
     {
       label: "完整占位符保留布尔与数字类型",
-      pass: result.should_create_ticket === false && result.observed_ticket_count === 2,
+      pass: result.should_create_ticket === true && result.observed_ticket_count === 2,
       detail: "should_create_ticket=" + String(result.should_create_ticket) + ", observed_ticket_count=" + String(result.observed_ticket_count),
     },
     {
-      label: "未触发 create_ticket，final_output 未被后续工具覆盖",
-      pass: !output.toolCalls.some((toolCall) => toolCall.toolName === "create_ticket") && result.source === "return_output_mapping",
+      label: "create_ticket 后 return output_mapping 仍生效",
+      pass: output.toolCalls.some((toolCall) => toolCall.toolName === "create_ticket") && result.source === "return_output_mapping",
       detail: "toolCalls=" + output.toolCalls.map((toolCall) => toolCall.toolName).join(", "),
     },
     {
