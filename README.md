@@ -27,14 +27,15 @@ AI 判断 5W1H（何时、何地、何事、何因、何人、如何）
 ## 当前版本
 
 ```text
-v0.3.3 — Memory Persistence
+v0.3.4 — Memory Store Abstraction
 ```
 
-v0.3.3 在 v0.3.2 的记忆观测基础上增加最小持久化能力：MemoryService 支持 `dumpSnapshot()` / `restoreSnapshot()`，新增本地 JSON MemorySnapshot 存储，恢复后重建 fingerprint 与计数器，并验证恢复后重复实践不会重复写入记忆。仍是内存版快照，不含向量检索或图记忆数据库。
+v0.3.4 在 v0.3.3 的记忆快照持久化基础上抽出存储边界：新增 `MemoryStore` 接口、`JsonMemoryStore` 实现，以及 `saveMemoryService()` / `loadMemoryService()` helper。这样 MemoryService 只负责 dump/restore snapshot，具体存储实现可以后续替换。仍是本地 JSON 快照，不含 SQLite、向量检索或图记忆数据库。
 
 ```bash
 npm run demo:memory                # 记忆观测闭环验证
 npm run demo:memory:persistence    # 记忆持久化闭环验证
+npm run demo:memory:store          # 记忆存储抽象验证
 ```
 
 ## 快速开始
@@ -59,6 +60,7 @@ npm run demo                       # 运行 Mock LLM Demo
 npm run demo:llm                   # 运行真实 LLM Demo
 npm run demo:memory                # 运行记忆观测 Demo
 npm run demo:memory:persistence    # 运行记忆持久化 Demo
+npm run demo:memory:store          # 运行记忆存储抽象 Demo
 npm run typecheck                  # TypeScript 类型检查
 npm run build                      # 编译
 npm run start:dist                 # 运行编译产物
@@ -91,10 +93,10 @@ Results crystallize as memory → next practice gets better
 ## Current Version
 
 ```text
-v0.3.3 — Memory Persistence
+v0.3.4 — Memory Store Abstraction
 ```
 
-v0.3.3 adds minimal persistence on top of v0.3.2 memory observability: MemoryService supports `dumpSnapshot()` / `restoreSnapshot()`, local JSON MemorySnapshot storage is available, fingerprints and counters are rebuilt after restore, and repeated practice runs after restore are verified not to write duplicate memories. Still snapshot-backed in-memory memory, no vector search or graph memory database.
+v0.3.4 extracts a storage boundary on top of v0.3.3 memory snapshot persistence: a `MemoryStore` interface, a `JsonMemoryStore` implementation, and `saveMemoryService()` / `loadMemoryService()` helpers. MemoryService now owns snapshot dump/restore while storage implementations can be replaced later. Still local JSON snapshot-backed memory, no SQLite, vector search, or graph memory database.
 
 ## Quick Start
 
@@ -118,6 +120,7 @@ npm run demo                       # Run mock LLM demo
 npm run demo:llm                   # Run real LLM demo
 npm run demo:memory                # Run memory observability demo
 npm run demo:memory:persistence    # Run memory persistence demo
+npm run demo:memory:store          # Run memory store abstraction demo
 npm run typecheck                  # TypeScript type-check
 npm run build                      # Compile
 npm run start:dist                 # Run compiled output
