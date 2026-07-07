@@ -8,21 +8,21 @@ README is the project entry point. Version history, verification coverage, and r
 
 ## Current State / 当前状态
 
-Current version: `v0.3.5 — Skill Runtime Semantics`
+Current version: `v0.3.6 — Runtime Store Binding`
 
-当前版本：`v0.3.5 — Skill Runtime Semantics`
+当前版本：`v0.3.6 — Runtime Store Binding`
 
 | Boundary / 边界 | Status / 状态 |
 |---|---|
-| Actor Kernel | Single-Actor loop supports ToolCall, approval, continue, Trace, memory crystallization, and stricter Skill semantics. / 单 Actor 闭环已支持 ToolCall、审批、continue、Trace、记忆沉淀与更严格的 Skill 语义。 |
+| Actor Kernel | Single-Actor loop supports ToolCall, approval, continue, Trace, memory crystallization, stricter Skill semantics, and optional store-backed runs. / 单 Actor 闭环已支持 ToolCall、审批、continue、Trace、记忆沉淀、更严格的 Skill 语义与可选 Store-backed run。 |
 | Skill Runtime | Strict step parsing, first-class transform execution, return output mapping, and explicit unsupported-step errors are available. / 已支持严格 step 解析、transform 一等执行、return output mapping、未支持步骤显式报错。 |
 | LLM Gateway | Supports mock / real structured-output mode. / 支持 mock / real 结构化输出模式。 |
 | Policy / Approval | Tool permission, autonomy level, and before_call approval are wired in. / Tool 权限、自主等级、before_call 审批已接入。 |
 | Hybrid Memory | Candidate, record, policy, extraction, retrieval, and view are wired in. / 候选、记录、策略、提取、检索与视图已接入。 |
-| Memory Dedup | Stable fingerprints prevent duplicate writes across repeated runs. / 稳定 fingerprint 防止重复实践重复写入。 |
-| Memory Observability | `memory_write_summary` and `lastWriteSummary` are available. / 已有写入摘要 Trace 和最近写入统计。 |
+| Memory Dedup | Stable fingerprints prevent duplicate writes across repeated runs, including repeated store-backed runs after restore. / 稳定 fingerprint 防止重复实践重复写入，包括 restore 后重复的 store-backed run。 |
+| Memory Observability | `memory_write_summary`, `lastWriteSummary`, and memory store lifecycle Trace events are available. / 已有写入摘要 Trace、最近写入统计与 memory store 生命周期 Trace。 |
 | Memory Persistence | JSON snapshot dump / restore is verified. / JSON 快照 dump / restore 已验证。 |
-| Memory Store | `MemoryStore` and `JsonMemoryStore` are verified. / `MemoryStore` 与 `JsonMemoryStore` 已验证。 |
+| Memory Store | `MemoryStore`, `JsonMemoryStore`, and Runtime Store Binding are verified. / `MemoryStore`、`JsonMemoryStore` 与 Runtime Store Binding 已验证。 |
 
 ## Verification Matrix / 验收矩阵
 
@@ -35,28 +35,55 @@ Current version: `v0.3.5 — Skill Runtime Semantics`
 | `npm run demo:memory:persistence` | MemorySnapshot demo, 10 checks / 记忆快照 Demo，10 条验收 |
 | `npm run demo:memory:store` | MemoryStore demo, 8 checks / 记忆存储抽象 Demo，8 条验收 |
 | `npm run demo:skill` | Skill Runtime Semantics demo, 10 checks / Skill Runtime 语义 Demo，10 条验收 |
+| `npm run demo:runtime:store` | Runtime Store Binding demo, 10 checks / Runtime Store Binding Demo，10 条验收 |
 
 ---
 
-## Planned: v0.3.6 — Runtime Store Binding
+## Planned: v0.3.7 — Trace Persistence
 
-Goal: make store-backed runtime usage more natural without changing the MemoryStore boundary.
+Goal: persist Trace records across process boundaries without changing the TraceLogger event contract.
 
-目标：在不改变 MemoryStore 边界的前提下，让运行时使用持久化 Store 更自然。
+目标：在不改变 TraceLogger 事件契约的前提下，让 Trace 可以跨进程边界保存与恢复。
 
 Possible scope / 可能范围：
 
-- Runtime helper or wrapper that loads MemoryStore before a run and saves after completion.
-- Trace event for memory store load/save lifecycle.
-- Store-backed demo that runs across separate service clear/restore boundaries.
-- Keep existing Skill, Actor, memory, persistence, and store demos green.
+- Add a TraceSnapshot schema or TraceStore boundary.
+- Add JSON-backed TraceStore implementation or helpers.
+- Add a trace persistence demo that verifies replayable run metadata after clear/restore.
+- Keep existing Actor, Skill, memory, persistence, store, and runtime-store demos green.
 
 中文可能范围：
 
-- 增加运行时 helper 或 wrapper，在运行前 load MemoryStore，运行后 save。
-- 增加 memory store load/save 生命周期 Trace。
-- 新增基于 Store 的跨 clear/restore 运行 Demo。
-- 保持现有 Skill、Actor、memory、persistence、store demos 全部通过。
+- 新增 TraceSnapshot schema 或 TraceStore 边界。
+- 增加 JSON-backed TraceStore 实现或 helper。
+- 新增 Trace 持久化 Demo，验证 clear/restore 后仍可复盘运行元数据。
+- 保持现有 Actor、Skill、memory、persistence、store、runtime-store demos 全部通过。
+
+---
+
+## v0.3.6 — Runtime Store Binding
+
+- Added optional `runtimeOptions.memoryStore` to `ActorRuntime.run()`.
+- Runtime now loads `MemoryStore` before `ActorContext` construction so restored memories can participate in retrieval.
+- Runtime now saves `MemoryStore` after memory generation and `memory_write_summary`.
+- Added `memory_store_load`, `memory_store_save`, and `memory_store_error` Trace event types.
+- Added Runtime MemoryStore helper functions for load/save lifecycle binding.
+- Preserved existing pure in-memory behavior when no `memoryStore` is provided.
+- Added `demo:runtime:store` with 10 checks.
+- Added Runtime Store Binding Demo to CI.
+- Updated README and package metadata to v0.3.6.
+
+中文：
+
+- `ActorRuntime.run()` 新增可选 `runtimeOptions.memoryStore`。
+- Runtime 会在构建 `ActorContext` 前加载 `MemoryStore`，让恢复出来的记忆参与检索。
+- Runtime 会在记忆生成和 `memory_write_summary` 后保存 `MemoryStore`。
+- 新增 `memory_store_load`、`memory_store_save`、`memory_store_error` Trace 事件类型。
+- 新增 Runtime MemoryStore load/save 生命周期 helper。
+- 未传入 `memoryStore` 时保持现有纯内存行为。
+- 新增 `demo:runtime:store`，包含 10 条验收。
+- CI 增加 Runtime Store Binding Demo。
+- README 与 package 元数据对齐到 v0.3.6。
 
 ---
 
