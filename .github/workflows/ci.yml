@@ -49,3 +49,6 @@ jobs:
 
       - name: Trace Persistence Demo
         run: npm run demo:trace:persistence
+
+      - name: Human Input Runtime Demo
+        run: npm run demo:human:input
