@@ -1,6 +1,6 @@
 // ============================================================================
 // ActorRuntime — Actor Kernel 主执行器
-// v0.2.0: llm_judge 通过 ActorDecisionEngine.generateJudgeResult 接入 LLMGateway
+// v0.3.0: ActorContextBuilder 接入 Hybrid Memory；MemoryCandidate 自动进入 MemoryPolicy
 // ============================================================================
 
 import { ActorConfig } from "../core/types/actor";
@@ -120,10 +120,13 @@ export class ActorRuntime {
     traceLogger.startRun(actorRunId, actorId, skill.skillId);
 
     try {
-      const context = actorContextBuilder.build(input.actorConfig, input.input, input.runtimeContext ?? {});
+      const context = actorContextBuilder.build(input.actorConfig, input.input, input.runtimeContext ?? {}, actorRunId);
       traceLogger.record(actorRunId, "context_built", {
         actorId, skillId: skill.skillId,
         memoryCount: context.memory.actorPrivate.length,
+        hybridMemoryCount:
+          context.memory.structured.length + context.memory.semantic.length + context.memory.episodic.length +
+          context.memory.procedural.length + context.memory.governance.length,
         availableToolCount: context.availableTools.length,
       });
 
@@ -189,7 +192,6 @@ export class ActorRuntime {
       const step = skillRuntime.getCurrentStep(skill, state);
       if (!step) { state.status = "completed"; break; }
 
-      // ---- llm_judge 预执行：v0.2.0 由 LLMGateway 产生结构化判断 ----
       if (step.type === "llm_judge") {
         const judgeStep = step as LLMJudgeStep;
         const judgeResult = await actorDecisionEngine.generateJudgeResult({
@@ -201,7 +203,6 @@ export class ActorRuntime {
         skillRuntime.executeLLMJudge(judgeStep, state, actorRunId, judgeResult);
       }
 
-      // ---- tool_call: 构建 request（解析 inputMapping），记录 step 开始 ----
       let prebuiltRequest: ToolCallRequest | undefined;
       if (step.type === "tool_call") {
         const toolStep = step as ToolCallStep;
@@ -209,10 +210,8 @@ export class ActorRuntime {
         skillRuntime.startToolCallStep(toolStep, actorRunId);
       }
 
-      // ---- 生成决策（传入 prebuiltRequest，arguments 完整） ----
       const decision = actorDecisionEngine.decide(step, context, state, actorRunId, prebuiltRequest);
 
-      // ---- 执行决策（传入 prebuiltRequest，executor 直接用） ----
       const execResult = await actorDecisionExecutor.execute(
         decision, context, state, actorRunId, actorId,
         step.type === "tool_call"
@@ -222,7 +221,6 @@ export class ActorRuntime {
 
       switch (execResult.outcome) {
         case "completed": {
-          // 只做 trace 收尾，state 已由 executor 写入
           if (step.type === "tool_call" && execResult.observation) {
             skillRuntime.completeToolCallStep(step as ToolCallStep, state, execResult.observation, actorRunId);
           }
@@ -250,8 +248,10 @@ export class ActorRuntime {
       skillRuntime.advanceStep(state);
     }
 
-    // ---- MemoryCandidate ----
     const memoryCandidates = memoryService.generateCandidates(actorRunId, actorId, {
+      organizationId: context.actor.organizationId,
+      unitId: context.actor.unitId,
+      sceneId: context.runtimeContext.scene_id as string | undefined,
       inputText: context.input.text ?? "", finalResult,
       observations: state.observations,
       actorMemory: context.memory.actorPrivate,
@@ -262,6 +262,15 @@ export class ActorRuntime {
       traceLogger.record(actorRunId, "memory_candidate_generated", {
         candidateId: c.candidateId, scope: c.scope, type: c.type, content: c.content,
       } as Record<string, unknown>);
+      const accepted = memoryService.getAllMemories().find((m) => m.sourceRunId === actorRunId && m.content === c.content);
+      if (accepted) {
+        traceLogger.record(actorRunId, "memory_accepted", {
+          memoryId: accepted.memoryId,
+          candidateId: c.candidateId,
+          scope: accepted.scope,
+          type: accepted.type,
+        });
+      }
     }
 
     const endStatus = state.status === "waiting_approval" ? "waiting_approval"
@@ -273,10 +282,6 @@ export class ActorRuntime {
 
     return this.buildOutput(actorRunId, endStatus as "completed" | "waiting_approval" | "error", finalResult, undefined, memoryCandidates);
   }
-
-  // -----------------------------------------------------------------------
-  // buildOutput
-  // -----------------------------------------------------------------------
 
   private buildOutput(
     actorRunId: string,
