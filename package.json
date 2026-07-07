@@ -1,6 +1,6 @@
 {
   "name": "@foreverthinking/organize",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Self-Operating Organization Actor Kernel",
   "private": true,
   "scripts": {
@@ -12,6 +12,7 @@
     "demo:memory:store": "tsx src/examples/memory-store.demo.ts",
     "demo:skill": "tsx src/examples/skill-runtime-semantics.demo.ts",
     "demo:runtime:store": "tsx src/examples/runtime-store-binding.demo.ts",
+    "demo:trace:persistence": "tsx src/examples/trace-persistence.demo.ts",
     "build": "tsc",
     "start:dist": "node dist/examples/customer-after-sales.demo.js",
     "typecheck": "tsc --noEmit"
