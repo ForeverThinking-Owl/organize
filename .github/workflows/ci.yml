@@ -46,3 +46,6 @@ jobs:
 
       - name: Runtime Store Binding Demo
         run: npm run demo:runtime:store
+
+      - name: Trace Persistence Demo
+        run: npm run demo:trace:persistence
