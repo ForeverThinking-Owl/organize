@@ -34,3 +34,6 @@ jobs:
 
       - name: Hybrid Memory Demo
         run: npm run demo:memory
+
+      - name: Memory Persistence Demo
+        run: npm run demo:memory:persistence
