@@ -37,3 +37,6 @@ jobs:
 
       - name: Memory Persistence Demo
         run: npm run demo:memory:persistence
+
+      - name: Memory Store Demo
+        run: npm run demo:memory:store
