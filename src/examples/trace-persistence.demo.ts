@@ -225,7 +225,12 @@ async function main() {
       },
       {
         label: "JsonTraceStore.save/load 成功保存 TraceSnapshot",
-        pass: initialLoad === null && storedSnapshot?.schemaVersion === TRACE_SNAPSHOT_SCHEMA_VERSION && storedSnapshot.traces.length === 1,
+        pass: Boolean(
+          initialLoad === null &&
+          storedSnapshot &&
+          storedSnapshot.schemaVersion === TRACE_SNAPSHOT_SCHEMA_VERSION &&
+          storedSnapshot.traces.length === 1
+        ),
         detail: "initialLoad=" + String(initialLoad) + ", storedTraces=" + String(storedSnapshot?.traces.length ?? 0),
       },
       {
