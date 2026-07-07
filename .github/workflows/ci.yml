@@ -26,5 +26,8 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Demo
+      - name: Actor Kernel Demo
         run: npm run demo
+
+      - name: Hybrid Memory Demo
+        run: npm run demo:memory

@@ -27,10 +27,14 @@ AI 判断 5W1H（何时、何地、何事、何因、何人、如何）
 ## 当前版本
 
 ```text
-v0.2.1 — LLM Integration Hardening
+v0.3.0 — Hybrid Memory System
 ```
 
-v0.2.1 在 v0.2.0 Real LLM Integration 的基础上加固 LLM 接入层：增加 CI、轻量 `.env` 加载、LLM retry、结构化输出失败后的可控 fallback 边界。Actor Kernel 边界保持不变，PolicyEngine、ApprovalGate、ToolGateway、MemoryService 仍然在模型边界之外执行治理。
+v0.3.0 引入内存版混合记忆系统：MemoryRecord、MemoryCandidate、MemoryPolicy、MemoryExtractor、HybridMemoryView。Actor 不只完成一次实践，而能从实践中沉淀经验，并在下一次实践中读取经验。仍是内存版，不含向量检索或图记忆数据库。
+
+```bash
+npm run demo:memory    # 混合记忆闭环验证
+```
 
 ## 快速开始
 

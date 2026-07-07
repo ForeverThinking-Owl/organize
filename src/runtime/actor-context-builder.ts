@@ -1,13 +1,13 @@
 // ============================================================================
 // ActorContextBuilder — 构建 Actor 运行上下文
 // 每次 Actor 运行前，组装完整上下文：
-//   Actor Profile + Memory + Permission + Approval Policy + Available Tools + Input
+//   Actor Profile + Hybrid Memory + Permission + Approval Policy + Available Tools + Input
 // ============================================================================
 
 import { ActorContext, ActorConfig, ToolForActor } from "../core/types/actor";
-import { ToolDefinition } from "../core/types/tool";
 import { memoryService } from "../memory/memory-service";
 import { toolGateway } from "../tools/tool-gateway";
+import { traceLogger } from "../trace/trace-logger";
 
 /**
  * 从 JSON 配置构建 ActorProfile
@@ -58,22 +58,32 @@ export class ActorContextBuilder {
       text?: string;
       payload?: Record<string, unknown>;
     },
-    runtimeContext: Record<string, unknown> = {}
+    runtimeContext: Record<string, unknown> = {},
+    actorRunId?: string
   ): ActorContext {
     const actor = buildActorProfile(config);
+    const retrieval = memoryService.retrieve({
+      organizationId: actor.organizationId,
+      unitId: actor.unitId,
+      actorId: actor.actorId,
+      sceneId: runtimeContext.scene_id as string | undefined,
+      query: input.text,
+      topK: 12,
+    });
+
+    if (actorRunId) {
+      traceLogger.record(actorRunId, "memory_retrieved", {
+        count: retrieval.records.length,
+        types: retrieval.records.map((m) => m.type),
+        scopes: retrieval.records.map((m) => m.scope),
+      });
+    }
 
     return {
       actor,
       input,
       runtimeContext,
-      memory: {
-        organizationPublic: memoryService.getOrganizationPublic(actor.organizationId),
-        unitMemory: actor.unitId
-          ? memoryService.getUnitMemory(actor.unitId)
-          : [],
-        actorPrivate: memoryService.getActorPrivate(actor.actorId),
-        sceneShared: {},
-      },
+      memory: retrieval.view,
       permissions: {
         allowedTools: config.permissions.allowed_tools,
         deniedTools: config.permissions.denied_tools,

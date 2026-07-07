@@ -10,6 +10,7 @@ export type TraceEventType =
   | "actor_run_start"
   | "actor_run_end"
   | "context_built"
+  | "memory_retrieved"
   | "skill_step_start"
   | "skill_step_end"
   | "tool_call_start"
@@ -26,6 +27,7 @@ export type TraceEventType =
   | "handoff"
   | "final_output"
   | "memory_candidate_generated"
+  | "memory_accepted"
   | "error";
 
 /**
