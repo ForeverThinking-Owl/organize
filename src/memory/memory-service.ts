@@ -1,6 +1,6 @@
 // ============================================================================
 // MemoryService — 内存混合记忆服务
-// v0.3.2: MemoryCandidate / MemoryRecord 写入观测与稳定 fingerprint 复用
+// v0.3.3: MemoryCandidate / MemoryRecord 写入观测、稳定 fingerprint、快照恢复
 // ============================================================================
 
 import {
@@ -16,6 +16,7 @@ import { ToolObservation } from "../core/types/tool";
 import { memoryExtractor, MemoryExtractionInput } from "./memory-extractor";
 import { memoryPolicy } from "./memory-policy";
 import { memoryFingerprint, normalizeMemoryText } from "./memory-fingerprint";
+import { MEMORY_SNAPSHOT_SCHEMA_VERSION, type MemorySnapshot } from "./memory-snapshot";
 
 let memoryCounter = 0;
 
@@ -81,6 +82,20 @@ function emptyWriteSummary(): MemoryWriteSummary {
   };
 }
 
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function maxCounterFromIds(ids: string[], prefix: string): number {
+  let max = 0;
+  for (const id of ids) {
+    if (!id.startsWith(prefix)) continue;
+    const n = Number(id.slice(prefix.length));
+    if (Number.isInteger(n) && n > max) max = n;
+  }
+  return max;
+}
+
 function typeBucket(type: MemoryType): keyof Omit<HybridMemoryView,
   "working" | "organizationPublic" | "unitMemory" | "actorPrivate" | "sceneShared"> {
   if (type === "episodic" || type === "run_summary") return "episodic";
@@ -140,6 +155,16 @@ export class MemoryService {
   private candidateFingerprints: Set<string> = new Set();
   private lastWriteSummary: MemoryWriteSummary | null = null;
 
+  private rebuildFingerprints(): void {
+    this.memoryFingerprints = new Set(this.memories.map((memory) => memoryFingerprint(memory)));
+    this.candidateFingerprints = new Set(this.candidates.map((candidate) => memoryFingerprint(candidate)));
+  }
+
+  private restoreCounters(): void {
+    memoryCounter = maxCounterFromIds(this.memories.map((m) => m.memoryId), "mem_");
+    memoryExtractor.setCounter(maxCounterFromIds(this.candidates.map((c) => c.candidateId), "cand_"));
+  }
+
   private addMemoryWithResult(entry: Omit<MemoryRecord, "memoryId" | "createdAt">): MemoryAddResult {
     const fingerprint = memoryFingerprint(entry);
     const existing = this.memories.find((m) =>
@@ -168,6 +193,28 @@ export class MemoryService {
 
   addMemory(entry: Omit<MemoryRecord, "memoryId" | "createdAt">): MemoryRecord {
     return this.addMemoryWithResult(entry).record;
+  }
+
+  dumpSnapshot(): MemorySnapshot {
+    return {
+      schemaVersion: MEMORY_SNAPSHOT_SCHEMA_VERSION,
+      savedAt: new Date().toISOString(),
+      memories: cloneJson(this.memories),
+      candidates: cloneJson(this.candidates),
+      lastWriteSummary: this.lastWriteSummary ? cloneJson(this.lastWriteSummary) : null,
+    };
+  }
+
+  restoreSnapshot(snapshot: MemorySnapshot): void {
+    if (snapshot.schemaVersion !== MEMORY_SNAPSHOT_SCHEMA_VERSION) {
+      throw new Error("Unsupported MemorySnapshot schemaVersion: " + String(snapshot.schemaVersion));
+    }
+
+    this.memories = cloneJson(snapshot.memories);
+    this.candidates = cloneJson(snapshot.candidates);
+    this.lastWriteSummary = snapshot.lastWriteSummary ? cloneJson(snapshot.lastWriteSummary) : null;
+    this.rebuildFingerprints();
+    this.restoreCounters();
   }
 
   getOrganizationPublic(organizationId: string): string[] {

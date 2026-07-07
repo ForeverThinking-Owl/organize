@@ -1,6 +1,6 @@
 // ============================================================================
 // MemoryExtractor
-// v0.3.0: 从实践运行结果中提取混合记忆候选
+// v0.3.3: 从实践运行结果中提取混合记忆候选，支持快照恢复计数器
 // ============================================================================
 
 import { MemoryCandidate } from "../core/types/memory";
@@ -182,6 +182,10 @@ export class MemoryExtractor {
 
   reset(): void {
     candidateCounter = 0;
+  }
+
+  setCounter(value: number): void {
+    candidateCounter = Math.max(0, Math.floor(value));
   }
 }
 
