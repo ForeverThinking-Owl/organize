@@ -28,6 +28,7 @@ export type TraceEventType =
   | "final_output"
   | "memory_candidate_generated"
   | "memory_accepted"
+  | "memory_write_summary"
   | "error";
 
 /**
