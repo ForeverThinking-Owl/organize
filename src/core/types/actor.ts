@@ -4,6 +4,8 @@
 //   有身份、有记忆、有权限、有审批判断、有技能、有工具范围、有运行边界
 // ============================================================================
 
+import { HybridMemoryView } from "./memory";
+
 /**
  * Actor 主体信息
  */
@@ -35,16 +37,7 @@ export interface ActorContext {
     payload?: Record<string, unknown>;
   };
   runtimeContext: Record<string, unknown>;
-  memory: {
-    /** 组织公共记忆 */
-    organizationPublic: string[];
-    /** 所属单元记忆 */
-    unitMemory: string[];
-    /** Actor 私有记忆 */
-    actorPrivate: string[];
-    /** 当前场景共享上下文 */
-    sceneShared: Record<string, unknown>;
-  };
+  memory: HybridMemoryView;
   permissions: {
     allowedTools: string[];
     deniedTools: string[];
