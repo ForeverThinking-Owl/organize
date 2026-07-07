@@ -5,7 +5,7 @@
 
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { TRACE_SNAPSHOT_SCHEMA_VERSION, TraceSnapshot } from "./trace-snapshot";
+import { TRACE_SNAPSHOT_SCHEMA_VERSION, type TraceSnapshot } from "./trace-snapshot";
 import type { TraceStore } from "./trace-store";
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -63,7 +63,9 @@ function assertActorRunTrace(value: unknown, index: number): void {
     throw new Error(`Invalid TraceSnapshot: traces[${index}].events must be an array`);
   }
 
-  value.events.forEach((event, eventIndex) => assertTraceEvent(event, eventIndex, value.actorRunId));
+  const actorRunId = value.actorRunId;
+  const events = value.events as unknown[];
+  events.forEach((event, eventIndex) => assertTraceEvent(event, eventIndex, actorRunId));
 }
 
 export function assertTraceSnapshot(value: unknown): asserts value is TraceSnapshot {
@@ -80,7 +82,8 @@ export function assertTraceSnapshot(value: unknown): asserts value is TraceSnaps
     throw new Error("Invalid TraceSnapshot: traces must be an array");
   }
 
-  value.traces.forEach(assertActorRunTrace);
+  const traces = value.traces as unknown[];
+  traces.forEach(assertActorRunTrace);
 }
 
 export async function saveTraceSnapshot(filePath: string, snapshot: TraceSnapshot): Promise<void> {
