@@ -9,6 +9,10 @@ import { memoryService } from "../memory/memory-service";
 import { toolGateway } from "../tools/tool-gateway";
 import { traceLogger } from "../trace/trace-logger";
 
+function preview(content: string, length = 48): string {
+  return content.length > length ? content.slice(0, length) + "..." : content;
+}
+
 /**
  * 从 JSON 配置构建 ActorProfile
  */
@@ -76,6 +80,14 @@ export class ActorContextBuilder {
         count: retrieval.records.length,
         types: retrieval.records.map((m) => m.type),
         scopes: retrieval.records.map((m) => m.scope),
+        memoryIds: retrieval.records.map((m) => m.memoryId),
+        summaries: retrieval.records.map((m) => ({
+          memoryId: m.memoryId,
+          scope: m.scope,
+          type: m.type,
+          content: preview(m.content),
+          useCount: m.useCount ?? 0,
+        })),
       });
     }
 
