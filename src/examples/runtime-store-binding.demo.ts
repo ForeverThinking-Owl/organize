@@ -216,7 +216,7 @@ async function main() {
       },
       {
         label: "清空 MemoryService 后第二次运行自动 load Store",
-        pass: secondLoadEvent?.data.status === "loaded" && Number(secondLoadEvent.data.memoryCount ?? 0) === firstSnapshotMemoryCount,
+        pass: secondLoadEvent?.data.status === "loaded" && Number(secondLoadEvent?.data.memoryCount ?? 0) === firstSnapshotMemoryCount,
         detail: JSON.stringify(secondLoadEvent?.data ?? null),
       },
       {
