@@ -1,4 +1,4 @@
-[中文](#organize--自运组织) | [English](#organize--self-operating-organization)
+[中文](#organize--自运组织) | [English](#organize--self-operating-organization) | [CHANGELOG](./CHANGELOG.md)
 
 ---
 
@@ -6,23 +6,25 @@
 
 > foreverthinking · 让 AI 参与社会实践调度，人类保留实践主权
 
-## 目标
+## 这是什么
 
-organize 的目标，是构建一个面向自运组织的 Actor Kernel，让 AI 能像人类社会中的实践主体一样参与组织实践：判断 5W1H、调度任务、编排工具、协调角色、沉淀经验。
+organize 是一个面向“自运组织”的 Actor Kernel 原型。它把 AI 视为参与组织实践的主体，而不是单次问答工具：Actor 有身份、记忆、权限、审批边界、技能流程和工具范围，并在每次实践后沉淀经验，让下一次实践变得更好。
 
-人类从常规执行中上移，保留实践主权。实践主权包括：设定目标、制定边界、审批风险、监督过程、裁决例外、承担最终责任。
+它目前聚焦一个最小但完整的闭环：
 
 ```text
 输入一个实践事件
   ↓
-AI 判断 5W1H（何时、何地、何事、何因、何人、如何）
+构建 ActorContext：身份、权限、工具、记忆、输入
   ↓
-选择合适的 Actor → 执行 Skill → 编排 Tool
+执行 Skill：判断、调用工具、处理审批、生成结果
   ↓
-高风险动作进入审批
+记录 Trace：可审计、可复盘、可调试
   ↓
-结果沉淀为记忆 → 下一次实践变得更好
+沉淀 Memory：候选、策略、去重、检索、持久化
 ```
+
+人类从常规执行中上移，保留实践主权。实践主权包括：设定目标、制定边界、审批风险、监督过程、裁决例外、承担最终责任。
 
 ## 当前版本
 
@@ -30,57 +32,47 @@ AI 判断 5W1H（何时、何地、何事、何因、何人、如何）
 v0.3.4 — Memory Store Abstraction
 ```
 
-v0.3.4 在 v0.3.3 的记忆快照持久化基础上抽出存储边界：新增 `MemoryStore` 接口、`JsonMemoryStore` 实现，以及 `saveMemoryService()` / `loadMemoryService()` helper。这样 MemoryService 只负责 dump/restore snapshot，具体存储实现可以后续替换。仍是本地 JSON 快照，不含 SQLite、向量检索或图记忆数据库。
+当前版本在内存混合记忆、记忆硬化、记忆观测、JSON 快照持久化的基础上，抽出了 `MemoryStore` 存储边界。`MemoryService` 负责记忆的生成、去重、检索、快照 dump/restore；`MemoryStore` 负责快照存取。当前默认实现是本地 JSON 文件 `JsonMemoryStore`，后续可以替换为 SQLite、远程存储或其他持久化后端。
 
-## 当前能力地图
+版本历史、验收矩阵、CI 覆盖和下一步计划见 [CHANGELOG.md](./CHANGELOG.md)。
+
+## 核心概念
+
+| 概念 | 说明 |
+|---|---|
+| Actor | 组织中的实践主体，拥有身份、职责、权限、自主等级和记忆。 |
+| ActorContext | 每次运行前构建的完整上下文，包含 Actor Profile、输入、权限、可见工具和混合记忆。 |
+| Skill | Actor 的实践程式，描述按步骤执行的 SOP。 |
+| Tool | 实践入口，包含名称、方向、风险等级、输入输出 schema 和审批策略。 |
+| ApprovalGate | 高风险工具调用的审批边界，支持 waiting_approval / continue 流程。 |
+| Trace | 运行全过程事件记录，用于审计、调试和验收。 |
+| MemoryCandidate | 实践结束后提取出的记忆候选。 |
+| MemoryRecord | 进入长期记忆的权威记录。 |
+| MemoryStore | 记忆快照存储抽象，目前由 `JsonMemoryStore` 实现。 |
+
+## 架构概览
 
 ```text
 ActorRuntime
-  ├─ ActorContextBuilder：组装 Actor Profile、权限、工具、混合记忆
-  ├─ SkillRuntime：执行 Skill 步骤，维护 state / outputs / observations
-  ├─ ActorDecisionEngine：生成 ToolCall / final_output / LLM judge 决策
-  ├─ ActorDecisionExecutor：统一执行 ToolCall、审批继续、state 写入
-  ├─ PolicyEngine：权限检查与 Observation 字段过滤
-  ├─ ApprovalGate：高风险 ToolCall 审批
-  ├─ ToolGateway：工具定义与执行器路由
-  ├─ LLMGateway：mock / real LLM 结构化输出入口
-  ├─ MemoryService：记忆提取、去重、检索、快照 dump/restore
-  └─ MemoryStore：记忆快照存储抽象，当前实现为 JsonMemoryStore
-```
-
-## 已完成的关键边界
-
-| 边界 | 当前状态 |
-|---|---|
-| Actor Kernel | 单 Actor 闭环已可运行，支持 ToolCall、审批、continue、Trace、记忆沉淀 |
-| LLM Gateway | 支持 mock / real 模式，结构化输出校验失败后由 ActorDecisionEngine 保守 fallback |
-| Policy / Approval | Tool 权限、写操作等级、before_call 审批已进入运行链路 |
-| Hybrid Memory | MemoryCandidate / MemoryRecord / MemoryPolicy / MemoryExtractor / HybridMemoryView 已接入 |
-| Memory Dedup | fingerprint 稳定化，重复实践不重复写入同一批记忆 |
-| Memory Observability | `memory_write_summary` Trace 事件与 `lastWriteSummary` 统计已接入 |
-| Memory Persistence | MemorySnapshot JSON dump / restore 已验证 |
-| Memory Store | `MemoryStore` 抽象与 `JsonMemoryStore` 实现已验证 |
-
-## 验证脚本
-
-```bash
-npm run demo                       # Mock LLM Actor Kernel Demo，26 条验收
-npm run demo:memory                # Hybrid Memory / Observability Demo，12 条验收
-npm run demo:memory:persistence    # MemorySnapshot 持久化 Demo，10 条验收
-npm run demo:memory:store          # MemoryStore 抽象 Demo，8 条验收
-npm run typecheck                  # TypeScript 类型检查
-npm run build                      # 编译
-```
-
-CI 当前覆盖：
-
-```text
-typecheck
-build
-demo
-demo:memory
-demo:memory:persistence
-demo:memory:store
+  ├─ ActorContextBuilder
+  │    ├─ ActorProfile
+  │    ├─ permissions
+  │    ├─ available tools
+  │    └─ hybrid memory retrieval
+  ├─ SkillRuntime
+  ├─ ActorDecisionEngine
+  │    └─ LLMGateway mock / real
+  ├─ ActorDecisionExecutor
+  │    ├─ PolicyEngine
+  │    ├─ ApprovalGate
+  │    └─ ToolGateway
+  ├─ TraceLogger
+  └─ MemoryService
+       ├─ MemoryExtractor
+       ├─ MemoryPolicy
+       ├─ memoryFingerprint
+       ├─ MemorySnapshot dump / restore
+       └─ MemoryStore / JsonMemoryStore
 ```
 
 ## 快速开始
@@ -90,7 +82,7 @@ npm install
 npm run demo
 ```
 
-默认 demo 使用 mock LLM，稳定验证本地闭环。
+默认 demo 使用 mock LLM，适合稳定验证本地闭环。
 
 真实 LLM 模式需要先配置 `.env.example` 中的变量，然后运行：
 
@@ -98,31 +90,41 @@ npm run demo
 npm run demo:llm
 ```
 
-## 版本路线
-
-```text
-v0.3.0 — Hybrid Memory System
-v0.3.1 — Memory Hardening
-v0.3.2 — Memory Observability
-v0.3.3 — Memory Persistence
-v0.3.4 — Memory Store Abstraction
-v0.3.5 — Skill Runtime Semantics（计划中）
-```
-
-v0.3.5 的建议目标：让 `SkillConfig` 中声明的步骤类型和 `ActorRuntime` 的真实执行语义完全一致，重点包括严格解析 Skill step、正式接入 transform 步骤、支持 `ReturnStep.outputMapping`，以及显式处理 unsupported step type。
-
-## 工程脚本
+## 验证脚本
 
 ```bash
-npm run demo                       # 运行 Mock LLM Demo
-npm run demo:llm                   # 运行真实 LLM Demo
-npm run demo:memory                # 运行记忆观测 Demo
-npm run demo:memory:persistence    # 运行记忆持久化 Demo
-npm run demo:memory:store          # 运行记忆存储抽象 Demo
-npm run typecheck                  # TypeScript 类型检查
-npm run build                      # 编译
-npm run start:dist                 # 运行编译产物
+npm run demo                       # Mock LLM Actor Kernel Demo
+npm run demo:memory                # Hybrid Memory / Observability Demo
+npm run demo:memory:persistence    # MemorySnapshot persistence Demo
+npm run demo:memory:store          # MemoryStore abstraction Demo
+npm run typecheck                  # TypeScript type-check
+npm run build                      # Compile
 ```
+
+## 记忆与存储
+
+当前记忆系统仍然是轻量级本地实现，但已经具备清晰边界：
+
+```text
+MemoryService
+  ├─ retrieve()                     # 检索可访问记忆
+  ├─ generateCandidatesWithSummary() # 提取候选并记录写入摘要
+  ├─ dumpSnapshot()                 # 导出 MemorySnapshot
+  └─ restoreSnapshot()              # 从 MemorySnapshot 恢复
+
+MemoryStore
+  ├─ load()
+  ├─ save(snapshot)
+  └─ clear()
+```
+
+这意味着后续可以在不改动记忆核心语义的前提下，替换具体存储实现。
+
+## 项目状态
+
+当前仍是实验性 Actor Kernel。它的重点不是把所有能力一次做完，而是逐步明确边界：Actor、Skill、Tool、Policy、Approval、Trace、Memory、Store 都先形成最小可运行闭环，再逐步硬化。
+
+下一阶段将聚焦 Skill Runtime 的语义一致性，让 `SkillConfig` 中声明的步骤类型和 `ActorRuntime` 的真实执行行为完全对齐。
 
 ---
 
@@ -130,23 +132,25 @@ npm run start:dist                 # 运行编译产物
 
 > foreverthinking · AI participates in social practice. Humans retain practice sovereignty.
 
-## Vision
+## What it is
 
-organize aims to build an Actor Kernel for self-operating organizations, enabling AI to participate in organizational practice as practice subjects within human society: judging 5W1H, scheduling tasks, orchestrating tools, coordinating roles, and crystallizing experience.
+organize is an Actor Kernel prototype for self-operating organizations. It treats AI as a practice participant inside an organization, not as a one-off Q&A tool. An Actor has identity, memory, permissions, approval boundaries, skill workflows, and tool access. Each practice run can crystallize experience into memory, making the next run better.
 
-Humans move up from routine execution, retaining practice sovereignty. Practice sovereignty includes: setting goals, defining boundaries, approving risks, supervising processes, adjudicating exceptions, and bearing ultimate responsibility.
+The current system focuses on a minimal but complete loop:
 
 ```text
 Input a practice event
   ↓
-AI judges 5W1H (When, Where, What, Why, Who, How)
+Build ActorContext: identity, permissions, tools, memory, input
   ↓
-Selects Actor → executes Skill → orchestrates Tool
+Execute Skill: judge, call tools, handle approval, return result
   ↓
-High-risk actions enter approval
+Record Trace: auditable, replayable, debuggable
   ↓
-Results crystallize as memory → next practice gets better
+Crystallize Memory: candidates, policy, deduplication, retrieval, persistence
 ```
+
+Humans move up from routine execution while retaining practice sovereignty: setting goals, defining boundaries, approving risk, supervising process, adjudicating exceptions, and bearing final responsibility.
 
 ## Current Version
 
@@ -154,57 +158,47 @@ Results crystallize as memory → next practice gets better
 v0.3.4 — Memory Store Abstraction
 ```
 
-v0.3.4 extracts a storage boundary on top of v0.3.3 memory snapshot persistence: a `MemoryStore` interface, a `JsonMemoryStore` implementation, and `saveMemoryService()` / `loadMemoryService()` helpers. MemoryService now owns snapshot dump/restore while storage implementations can be replaced later. Still local JSON snapshot-backed memory, no SQLite, vector search, or graph memory database.
+This version builds on in-memory hybrid memory, memory hardening, memory observability, and JSON snapshot persistence by extracting a `MemoryStore` storage boundary. `MemoryService` owns memory creation, deduplication, retrieval, and snapshot dump/restore. `MemoryStore` owns snapshot storage. The current implementation is a local JSON file store, `JsonMemoryStore`, and can later be replaced by SQLite, remote storage, or other durable backends.
 
-## Capability Map
+Version history, verification matrix, CI coverage, and the next-step plan live in [CHANGELOG.md](./CHANGELOG.md).
+
+## Core Concepts
+
+| Concept | Description |
+|---|---|
+| Actor | A practice subject inside an organization, with identity, responsibility, permissions, autonomy level, and memory. |
+| ActorContext | The complete runtime context built before each run: Actor Profile, input, permissions, visible tools, and hybrid memory. |
+| Skill | The Actor's practice procedure, expressed as a step-based SOP. |
+| Tool | A practice entry point with name, direction, risk level, input/output schema, and approval policy. |
+| ApprovalGate | The approval boundary for high-risk tool calls, supporting waiting_approval / continue. |
+| Trace | Event log for auditability, debugging, and acceptance checks. |
+| MemoryCandidate | A memory candidate extracted after a practice run. |
+| MemoryRecord | An authoritative long-term memory record. |
+| MemoryStore | Snapshot storage abstraction, currently implemented by `JsonMemoryStore`. |
+
+## Architecture Overview
 
 ```text
 ActorRuntime
-  ├─ ActorContextBuilder: assembles Actor Profile, permissions, tools, and hybrid memory
-  ├─ SkillRuntime: executes Skill steps and maintains state / outputs / observations
-  ├─ ActorDecisionEngine: produces ToolCall / final_output / LLM judge decisions
-  ├─ ActorDecisionExecutor: executes ToolCalls, approval continuation, and state writes
-  ├─ PolicyEngine: checks permissions and filters observation fields
-  ├─ ApprovalGate: handles high-risk ToolCall approval
-  ├─ ToolGateway: routes tool definitions and executors
-  ├─ LLMGateway: mock / real structured LLM output boundary
-  ├─ MemoryService: extraction, deduplication, retrieval, snapshot dump/restore
-  └─ MemoryStore: snapshot storage abstraction, currently backed by JsonMemoryStore
-```
-
-## Completed Boundaries
-
-| Boundary | Current status |
-|---|---|
-| Actor Kernel | Single-Actor loop supports ToolCall, approval, continue, Trace, and memory crystallization |
-| LLM Gateway | Supports mock / real modes; structured-output failures fall back conservatively in ActorDecisionEngine |
-| Policy / Approval | Tool permission, write-operation autonomy level, and before_call approval are wired into runtime |
-| Hybrid Memory | MemoryCandidate / MemoryRecord / MemoryPolicy / MemoryExtractor / HybridMemoryView are wired in |
-| Memory Dedup | Stable fingerprints prevent duplicate writes across repeated practice runs |
-| Memory Observability | `memory_write_summary` Trace event and `lastWriteSummary` stats are available |
-| Memory Persistence | MemorySnapshot JSON dump / restore is verified |
-| Memory Store | `MemoryStore` abstraction and `JsonMemoryStore` implementation are verified |
-
-## Verification Scripts
-
-```bash
-npm run demo                       # Mock LLM Actor Kernel Demo, 26 checks
-npm run demo:memory                # Hybrid Memory / Observability Demo, 12 checks
-npm run demo:memory:persistence    # MemorySnapshot persistence Demo, 10 checks
-npm run demo:memory:store          # MemoryStore abstraction Demo, 8 checks
-npm run typecheck                  # TypeScript type-check
-npm run build                      # Compile
-```
-
-CI currently covers:
-
-```text
-typecheck
-build
-demo
-demo:memory
-demo:memory:persistence
-demo:memory:store
+  ├─ ActorContextBuilder
+  │    ├─ ActorProfile
+  │    ├─ permissions
+  │    ├─ available tools
+  │    └─ hybrid memory retrieval
+  ├─ SkillRuntime
+  ├─ ActorDecisionEngine
+  │    └─ LLMGateway mock / real
+  ├─ ActorDecisionExecutor
+  │    ├─ PolicyEngine
+  │    ├─ ApprovalGate
+  │    └─ ToolGateway
+  ├─ TraceLogger
+  └─ MemoryService
+       ├─ MemoryExtractor
+       ├─ MemoryPolicy
+       ├─ memoryFingerprint
+       ├─ MemorySnapshot dump / restore
+       └─ MemoryStore / JsonMemoryStore
 ```
 
 ## Quick Start
@@ -222,28 +216,38 @@ Real LLM mode requires `.env.example` variables, then run:
 npm run demo:llm
 ```
 
-## Roadmap
-
-```text
-v0.3.0 — Hybrid Memory System
-v0.3.1 — Memory Hardening
-v0.3.2 — Memory Observability
-v0.3.3 — Memory Persistence
-v0.3.4 — Memory Store Abstraction
-v0.3.5 — Skill Runtime Semantics (planned)
-```
-
-The recommended v0.3.5 goal is to align declared `SkillConfig` step types with actual `ActorRuntime` execution semantics, especially strict Skill step parsing, first-class transform execution, `ReturnStep.outputMapping`, and explicit unsupported-step handling.
-
-## Scripts
+## Verification Scripts
 
 ```bash
-npm run demo                       # Run mock LLM demo
-npm run demo:llm                   # Run real LLM demo
-npm run demo:memory                # Run memory observability demo
-npm run demo:memory:persistence    # Run memory persistence demo
-npm run demo:memory:store          # Run memory store abstraction demo
+npm run demo                       # Mock LLM Actor Kernel Demo
+npm run demo:memory                # Hybrid Memory / Observability Demo
+npm run demo:memory:persistence    # MemorySnapshot persistence Demo
+npm run demo:memory:store          # MemoryStore abstraction Demo
 npm run typecheck                  # TypeScript type-check
 npm run build                      # Compile
-npm run start:dist                 # Run compiled output
 ```
+
+## Memory and Storage
+
+The current memory system is still lightweight and local, but its boundaries are explicit:
+
+```text
+MemoryService
+  ├─ retrieve()                     # Retrieve accessible memories
+  ├─ generateCandidatesWithSummary() # Extract candidates and record write summary
+  ├─ dumpSnapshot()                 # Export MemorySnapshot
+  └─ restoreSnapshot()              # Restore from MemorySnapshot
+
+MemoryStore
+  ├─ load()
+  ├─ save(snapshot)
+  └─ clear()
+```
+
+This makes it possible to replace the storage implementation later without changing the core memory semantics.
+
+## Project Status
+
+This is still an experimental Actor Kernel. The goal is not to implement every capability at once, but to make each boundary explicit and verifiable: Actor, Skill, Tool, Policy, Approval, Trace, Memory, and Store now have a minimal running loop that can be hardened incrementally.
+
+The next stage will focus on Skill Runtime semantics, aligning declared `SkillConfig` step types with actual `ActorRuntime` execution behavior.
