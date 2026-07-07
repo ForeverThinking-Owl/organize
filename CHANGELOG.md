@@ -8,13 +8,13 @@ README is the project entry point. Version history, verification coverage, and r
 
 ## Current State / 当前状态
 
-Current version: `v0.3.6 — Runtime Store Binding`
+Current version: `v0.3.7 — Trace Persistence`
 
-当前版本：`v0.3.6 — Runtime Store Binding`
+当前版本：`v0.3.7 — Trace Persistence`
 
 | Boundary / 边界 | Status / 状态 |
 |---|---|
-| Actor Kernel | Single-Actor loop supports ToolCall, approval, continue, Trace, memory crystallization, stricter Skill semantics, and optional store-backed runs. / 单 Actor 闭环已支持 ToolCall、审批、continue、Trace、记忆沉淀、更严格的 Skill 语义与可选 Store-backed run。 |
+| Actor Kernel | Single-Actor loop supports ToolCall, approval, continue, Trace, memory crystallization, stricter Skill semantics, optional store-backed runs, and persistent Trace snapshots. / 单 Actor 闭环已支持 ToolCall、审批、continue、Trace、记忆沉淀、更严格的 Skill 语义、可选 Store-backed run 与 Trace 快照持久化。 |
 | Skill Runtime | Strict step parsing, first-class transform execution, return output mapping, and explicit unsupported-step errors are available. / 已支持严格 step 解析、transform 一等执行、return output mapping、未支持步骤显式报错。 |
 | LLM Gateway | Supports mock / real structured-output mode. / 支持 mock / real 结构化输出模式。 |
 | Policy / Approval | Tool permission, autonomy level, and before_call approval are wired in. / Tool 权限、自主等级、before_call 审批已接入。 |
@@ -23,6 +23,7 @@ Current version: `v0.3.6 — Runtime Store Binding`
 | Memory Observability | `memory_write_summary`, `lastWriteSummary`, and memory store lifecycle Trace events are available. / 已有写入摘要 Trace、最近写入统计与 memory store 生命周期 Trace。 |
 | Memory Persistence | JSON snapshot dump / restore is verified. / JSON 快照 dump / restore 已验证。 |
 | Memory Store | `MemoryStore`, `JsonMemoryStore`, and Runtime Store Binding are verified. / `MemoryStore`、`JsonMemoryStore` 与 Runtime Store Binding 已验证。 |
+| Trace Persistence | `TraceSnapshot`, `TraceStore`, `JsonTraceStore`, and TraceLogger dump / restore are verified. / `TraceSnapshot`、`TraceStore`、`JsonTraceStore` 与 TraceLogger dump / restore 已验证。 |
 
 ## Verification Matrix / 验收矩阵
 
@@ -36,28 +37,55 @@ Current version: `v0.3.6 — Runtime Store Binding`
 | `npm run demo:memory:store` | MemoryStore demo, 8 checks / 记忆存储抽象 Demo，8 条验收 |
 | `npm run demo:skill` | Skill Runtime Semantics demo, 10 checks / Skill Runtime 语义 Demo，10 条验收 |
 | `npm run demo:runtime:store` | Runtime Store Binding demo, 10 checks / Runtime Store Binding Demo，10 条验收 |
+| `npm run demo:trace:persistence` | Trace Persistence demo, 10 checks / Trace Persistence Demo，10 条验收 |
 
 ---
 
-## Planned: v0.3.7 — Trace Persistence
+## Planned: v0.3.8 — Human Input Runtime Semantics
 
-Goal: persist Trace records across process boundaries without changing the TraceLogger event contract.
+Goal: give `human_input` and explicit waiting steps a real runtime contract instead of only parsing them and failing as unsupported.
 
-目标：在不改变 TraceLogger 事件契约的前提下，让 Trace 可以跨进程边界保存与恢复。
+目标：让 `human_input` 与显式等待步骤拥有真实运行时契约，而不是只被解析后以 unsupported 失败。
 
 Possible scope / 可能范围：
 
-- Add a TraceSnapshot schema or TraceStore boundary.
-- Add JSON-backed TraceStore implementation or helpers.
-- Add a trace persistence demo that verifies replayable run metadata after clear/restore.
-- Keep existing Actor, Skill, memory, persistence, store, and runtime-store demos green.
+- Define `human_input` waiting output shape and continue event payload.
+- Add Trace events for human input requested / received.
+- Preserve approval-specific continue behavior while adding a general waiting boundary.
+- Add a human input runtime demo and keep all existing demos green.
 
 中文可能范围：
 
-- 新增 TraceSnapshot schema 或 TraceStore 边界。
-- 增加 JSON-backed TraceStore 实现或 helper。
-- 新增 Trace 持久化 Demo，验证 clear/restore 后仍可复盘运行元数据。
-- 保持现有 Actor、Skill、memory、persistence、store、runtime-store demos 全部通过。
+- 定义 `human_input` 等待输出结构和 continue event payload。
+- 新增 human input requested / received Trace 事件。
+- 保留审批专用 continue 行为，同时增加更通用的等待边界。
+- 新增 human input runtime demo，并保持现有 demos 全部通过。
+
+---
+
+## v0.3.7 — Trace Persistence
+
+- Added `TraceSnapshot` schema: `trace.snapshot.v1`.
+- Added `TraceStore` interface: `load()`, `save()`, `clear()`.
+- Implemented `JsonTraceStore` with JSON snapshot validation.
+- Added `saveTraceLogger()` / `loadTraceLogger()` helpers.
+- Added `TraceLogger.dumpSnapshot()` / `restoreSnapshot()`.
+- Restored Trace event counter from snapshot event IDs after restore.
+- Added `demo:trace:persistence` with 10 checks.
+- Added Trace Persistence Demo to CI.
+- Updated README and package metadata to v0.3.7.
+
+中文：
+
+- 新增 `TraceSnapshot` schema：`trace.snapshot.v1`。
+- 新增 `TraceStore` 接口：`load()`、`save()`、`clear()`。
+- 实现带 JSON 快照校验的 `JsonTraceStore`。
+- 新增 `saveTraceLogger()` / `loadTraceLogger()` helper。
+- 新增 `TraceLogger.dumpSnapshot()` / `restoreSnapshot()`。
+- restore 后从 snapshot eventId 恢复 Trace event counter。
+- 新增 `demo:trace:persistence`，包含 10 条验收。
+- CI 增加 Trace Persistence Demo。
+- README 与 package 元数据对齐到 v0.3.7。
 
 ---
 
