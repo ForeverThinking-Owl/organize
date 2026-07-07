@@ -27,13 +27,13 @@ AI 判断 5W1H（何时、何地、何事、何因、何人、如何）
 ## 当前版本
 
 ```text
-v0.3.1 — Hybrid Memory Hardening
+v0.3.2 — Memory Observability
 ```
 
-v0.3.1 加固内存版混合记忆流程：稳定 memory fingerprint、MemoryCandidate/MemoryRecord 写入去重、重复实践不产生重复记忆。仍是内存版，不含向量检索或图记忆数据库。
+v0.3.2 在 v0.3.1 的混合记忆硬化基础上增加记忆写入观测：抽出共享 memory fingerprint 工具，记录 `memory_write_summary` Trace 事件，暴露 MemoryService 最近一次写入摘要，并在 CI 中加入 build 验证。仍是内存版，不含向量检索或图记忆数据库。
 
 ```bash
-npm run demo:memory    # 混合记忆闭环验证
+npm run demo:memory    # 记忆观测闭环验证
 ```
 
 ## 快速开始
@@ -88,10 +88,10 @@ Results crystallize as memory → next practice gets better
 ## Current Version
 
 ```text
-v0.3.1 — Hybrid Memory Hardening
+v0.3.2 — Memory Observability
 ```
 
-v0.3.1 hardens the in-memory hybrid memory flow: stabilized memory fingerprints, MemoryCandidate/MemoryRecord write deduplication, and verified repeat practice runs do not create duplicate memories. Still in-memory only, no vector search or graph memory database.
+v0.3.2 adds memory write observability on top of v0.3.1 hybrid memory hardening: shared memory fingerprint utilities, a `memory_write_summary` Trace event, the latest write summary in MemoryService stats, and build verification in CI. Still in-memory only, no vector search or graph memory database.
 
 ## Quick Start
 

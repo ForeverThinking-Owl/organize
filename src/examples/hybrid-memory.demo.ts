@@ -1,6 +1,6 @@
 // ============================================================================
-// hybrid-memory.demo.ts — v0.3.1
-// 验证混合记忆硬化：去重、稳定检索、Trace 摘要、重复实践不重复写入
+// hybrid-memory.demo.ts — v0.3.2
+// 验证混合记忆观测：去重、稳定检索、Trace 摘要、写入统计、重复实践不重复写入
 // ============================================================================
 
 import { actorRuntime, ActorRunOutput } from "../runtime/actor-runtime";
@@ -11,7 +11,8 @@ import {
   createTicketTool, CreateTicketExecutor,
 } from "../tools/mock-tools";
 import { traceLogger } from "../trace/trace-logger";
-import { memoryService } from "../memory/memory-service";
+import { memoryService, type MemoryWriteSummary } from "../memory/memory-service";
+import { memoryFingerprint } from "../memory/memory-fingerprint";
 import { approvalGate } from "../approvals/approval-gate";
 import { MemoryRecord } from "../core/types/memory";
 
@@ -96,30 +97,21 @@ function memoryRetrievedCount(actorRunId: string): number {
   return memoryRetrievedEvent(actorRunId)?.data.count as number ?? 0;
 }
 
+function memoryWriteSummary(actorRunId: string): MemoryWriteSummary | null {
+  const trace = traceLogger.getTrace(actorRunId)!;
+  const event = trace.events.find((e) => e.eventType === "memory_write_summary");
+  return event?.data as unknown as MemoryWriteSummary | null;
+}
+
 function hasEvent(actorRunId: string, eventType: string): boolean {
   const trace = traceLogger.getTrace(actorRunId)!;
   return trace.events.some((e) => e.eventType === eventType);
 }
 
-function normalize(content: string): string {
-  return content.trim().toLowerCase().replace(/\s+/g, "").replace(/[，。、“”‘’；：,.!！?？]/g, "");
-}
-
-function memoryKey(memory: MemoryRecord): string {
-  return [
-    memory.organizationId,
-    memory.unitId ?? "",
-    memory.actorId ?? "",
-    memory.scope,
-    memory.type,
-    normalize(memory.content),
-  ].join("|");
-}
-
 function hasDuplicateMemories(memories: MemoryRecord[]): boolean {
   const seen = new Set<string>();
   for (const memory of memories) {
-    const key = memoryKey(memory);
+    const key = memoryFingerprint(memory);
     if (seen.has(key)) return true;
     seen.add(key);
   }
@@ -139,7 +131,7 @@ async function runPractice(inputText: string, orderId: string): Promise<ActorRun
 
 async function main() {
   console.log("=".repeat(60));
-  console.log("  ForeverThinking v0.3.1 — Hybrid Memory Hardening Demo");
+  console.log("  ForeverThinking v0.3.2 — Memory Observability Demo");
   console.log("=".repeat(60));
   console.log();
 
@@ -153,10 +145,12 @@ async function main() {
 
   const memoriesAfterFirst = memoryService.getAllMemories();
   const acceptedCount = memoriesAfterFirst.filter((m) => m.sourceRunId === first.actorRunId).length;
+  const firstWriteSummary = memoryWriteSummary(first.actorRunId);
   console.log("  Status: " + first.status);
   console.log("  MemoryCandidates: " + first.memoryCandidates.length);
   console.log("  AcceptedMemories: " + acceptedCount);
   console.log("  TotalMemories: " + memoriesAfterFirst.length);
+  console.log("  MemoryWriteSummary: " + JSON.stringify(firstWriteSummary));
   console.log();
 
   console.log("🔁 第二次运行：检索第一次沉淀的经验");
@@ -170,14 +164,16 @@ async function main() {
   console.log("  TotalMemories: " + memoriesAfterSecond.length);
   console.log();
 
-  console.log("🔂 第三次运行：重复第一次实践，验证去重");
+  console.log("🔂 第三次运行：重复第一次实践，验证去重和观测");
   const beforeThirdCount = memoryService.getAllMemories().length;
   const third = await runPractice("客户说扫码枪连不上系统，还要求退款。", "ORDER_10086");
   const afterThirdMemories = memoryService.getAllMemories();
   const afterThirdCount = afterThirdMemories.length;
+  const thirdWriteSummary = memoryWriteSummary(third.actorRunId);
   console.log("  Status: " + third.status);
   console.log("  BeforeThirdMemories: " + beforeThirdCount);
   console.log("  AfterThirdMemories: " + afterThirdCount);
+  console.log("  MemoryWriteSummary: " + JSON.stringify(thirdWriteSummary));
   console.log();
 
   const secondRetrievedEvent = memoryRetrievedEvent(second.actorRunId);
@@ -216,7 +212,7 @@ async function main() {
       detail: "summaries=" + secondSummaries.length,
     },
     {
-      label: "MemoryRecord 无重复 key",
+      label: "MemoryRecord 无重复 fingerprint",
       pass: !hasDuplicateMemories(afterThirdMemories),
       detail: hasDuplicateMemories(afterThirdMemories) ? "存在重复记忆" : "无重复记忆",
     },
@@ -226,8 +222,18 @@ async function main() {
       detail: "before=" + beforeThirdCount + ", after=" + afterThirdCount,
     },
     {
-      label: "MemoryService 统计信息稳定",
-      pass: stats.memoryCount === afterThirdCount && stats.activeMemoryCount === afterThirdCount,
+      label: "Trace 记录 memory_write_summary",
+      pass: Boolean(thirdWriteSummary),
+      detail: thirdWriteSummary ? JSON.stringify(thirdWriteSummary) : "未记录 memory_write_summary",
+    },
+    {
+      label: "重复实践观测到 Candidate 去重且无新增 Record",
+      pass: Boolean(thirdWriteSummary && thirdWriteSummary.skippedGlobalCandidateDuplicates > 0 && thirdWriteSummary.createdRecords === 0),
+      detail: JSON.stringify(thirdWriteSummary),
+    },
+    {
+      label: "MemoryService 统计信息稳定且暴露最近写入摘要",
+      pass: stats.memoryCount === afterThirdCount && stats.activeMemoryCount === afterThirdCount && Boolean(stats.lastWriteSummary),
       detail: JSON.stringify(stats),
     },
     {
@@ -238,7 +244,7 @@ async function main() {
   ];
 
   console.log("=".repeat(60));
-  console.log("  ✅ Hybrid Memory Hardening 验收检查 (10 条)");
+  console.log("  ✅ Memory Observability 验收检查 (12 条)");
   console.log("=".repeat(60));
 
   let passCount = 0;
@@ -252,7 +258,7 @@ async function main() {
   console.log("-".repeat(60));
   console.log("  通过: " + passCount + "/" + checks.length);
   console.log(passCount === checks.length
-    ? "  🎉 Hybrid Memory Hardening 验证通过！"
+    ? "  🎉 Memory Observability 验证通过！"
     : "  ❌ 部分验收标准未通过");
   console.log("-".repeat(60));
 
@@ -260,6 +266,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("Hybrid Memory Demo 执行失败:", error);
+  console.error("Memory Observability Demo 执行失败:", error);
   process.exit(1);
 });

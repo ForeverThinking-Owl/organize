@@ -1,6 +1,6 @@
 // ============================================================================
 // MemoryService — 内存混合记忆服务
-// v0.3.1: MemoryCandidate / MemoryRecord 去重，检索排序稳定化
+// v0.3.2: MemoryCandidate / MemoryRecord 写入观测与稳定 fingerprint 复用
 // ============================================================================
 
 import {
@@ -15,6 +15,7 @@ import { ActorProfile } from "../core/types/actor";
 import { ToolObservation } from "../core/types/tool";
 import { memoryExtractor, MemoryExtractionInput } from "./memory-extractor";
 import { memoryPolicy } from "./memory-policy";
+import { memoryFingerprint, normalizeMemoryText } from "./memory-fingerprint";
 
 let memoryCounter = 0;
 
@@ -29,42 +30,55 @@ export interface CandidateInput {
   sceneId?: string;
 }
 
-function normalizeText(content: string): string {
-  return content
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/[，。、“”‘’；：,.!！?？]/g, "");
+export interface MemoryWriteSummary {
+  extractedCandidates: number;
+  uniqueCandidates: number;
+  skippedBatchDuplicates: number;
+  skippedGlobalCandidateDuplicates: number;
+  candidateOnlyCandidates: number;
+  rejectedCandidates: number;
+  acceptedCandidates: number;
+  createdRecords: number;
+  dedupedRecords: number;
 }
 
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
-  const obj = value as Record<string, unknown>;
-  return `{${Object.keys(obj).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(obj[key])}`).join(",")}}`;
+export interface CandidateGenerationResult {
+  candidates: MemoryCandidate[];
+  summary: MemoryWriteSummary;
 }
 
-function memoryFingerprint(input: {
-  organizationId?: string;
-  unitId?: string;
-  actorId?: string;
-  sceneId?: string;
-  scope: string;
-  type: string;
-  content: string;
-  structuredData?: Record<string, unknown>;
-}): string {
-  const structured = input.structuredData ? stableStringify(input.structuredData) : "";
-  return [
-    input.organizationId ?? "",
-    input.unitId ?? "",
-    input.actorId ?? "",
-    input.sceneId ?? "",
-    input.scope,
-    input.type,
-    normalizeText(input.content),
-    structured,
-  ].join("|");
+export interface MemoryServiceStats {
+  memoryCount: number;
+  candidateCount: number;
+  activeMemoryCount: number;
+  lastWriteSummary: MemoryWriteSummary | null;
+}
+
+interface MemoryAddResult {
+  record: MemoryRecord;
+  created: boolean;
+}
+
+interface MemoryCandidateAcceptanceResult {
+  action: "auto_accept" | "candidate_only" | "reject" | "duplicate_candidate";
+  reason: string;
+  record: MemoryRecord | null;
+  createdRecord: boolean;
+  dedupedRecord: boolean;
+}
+
+function emptyWriteSummary(): MemoryWriteSummary {
+  return {
+    extractedCandidates: 0,
+    uniqueCandidates: 0,
+    skippedBatchDuplicates: 0,
+    skippedGlobalCandidateDuplicates: 0,
+    candidateOnlyCandidates: 0,
+    rejectedCandidates: 0,
+    acceptedCandidates: 0,
+    createdRecords: 0,
+    dedupedRecords: 0,
+  };
 }
 
 function typeBucket(type: MemoryType): keyof Omit<HybridMemoryView,
@@ -124,15 +138,19 @@ export class MemoryService {
   private candidates: MemoryCandidate[] = [];
   private memoryFingerprints: Set<string> = new Set();
   private candidateFingerprints: Set<string> = new Set();
+  private lastWriteSummary: MemoryWriteSummary | null = null;
 
-  addMemory(entry: Omit<MemoryRecord, "memoryId" | "createdAt">): MemoryRecord {
+  private addMemoryWithResult(entry: Omit<MemoryRecord, "memoryId" | "createdAt">): MemoryAddResult {
     const fingerprint = memoryFingerprint(entry);
-    const existing = this.memories.find((m) => memoryFingerprint(m) === fingerprint && m.status !== "archived" && m.status !== "expired");
+    const existing = this.memories.find((m) =>
+      memoryFingerprint(m) === fingerprint && m.status !== "archived" && m.status !== "expired"
+    );
     if (existing) {
       existing.confidence = Math.max(existing.confidence ?? 0, entry.confidence ?? 0);
       existing.importance = Math.max(existing.importance ?? 0, entry.importance ?? 0);
       existing.updatedAt = new Date().toISOString();
-      return existing;
+      this.memoryFingerprints.add(fingerprint);
+      return { record: existing, created: false };
     }
 
     const now = new Date().toISOString();
@@ -145,7 +163,11 @@ export class MemoryService {
     };
     this.memories.push(memory);
     this.memoryFingerprints.add(fingerprint);
-    return memory;
+    return { record: memory, created: true };
+  }
+
+  addMemory(entry: Omit<MemoryRecord, "memoryId" | "createdAt">): MemoryRecord {
+    return this.addMemoryWithResult(entry).record;
   }
 
   getOrganizationPublic(organizationId: string): string[] {
@@ -238,7 +260,7 @@ export class MemoryService {
 
     const bucketSeen = new Set<string>();
     const pushUnique = (bucket: string, content: string, push: () => void) => {
-      const key = `${bucket}|${normalizeText(content)}`;
+      const key = `${bucket}|${normalizeMemoryText(content)}`;
       if (bucketSeen.has(key)) return;
       bucketSeen.add(key);
       push();
@@ -257,28 +279,54 @@ export class MemoryService {
     return view;
   }
 
-  acceptCandidate(candidate: MemoryCandidate): MemoryRecord | null {
+  private acceptCandidateWithResult(candidate: MemoryCandidate): MemoryCandidateAcceptanceResult {
     const fingerprint = memoryFingerprint(candidate);
     if (this.candidateFingerprints.has(fingerprint)) {
-      return null;
+      return {
+        action: "duplicate_candidate",
+        reason: "duplicate candidate fingerprint",
+        record: null,
+        createdRecord: false,
+        dedupedRecord: false,
+      };
     }
 
     const decision = memoryPolicy.decide(candidate);
     this.candidateFingerprints.add(fingerprint);
-    this.candidates.push({ ...candidate, status: decision.action === "reject" ? "rejected" : "candidate" });
+    this.candidates.push({
+      ...candidate,
+      status: decision.action === "reject" ? "rejected" : decision.action === "auto_accept" ? "accepted" : "candidate",
+    });
 
     if (decision.action !== "auto_accept") {
-      return null;
+      return {
+        action: decision.action,
+        reason: decision.reason,
+        record: null,
+        createdRecord: false,
+        dedupedRecord: false,
+      };
     }
 
-    return this.addMemory(memoryPolicy.toRecord(candidate, decision.status));
+    const result = this.addMemoryWithResult(memoryPolicy.toRecord(candidate, decision.status));
+    return {
+      action: decision.action,
+      reason: decision.reason,
+      record: result.record,
+      createdRecord: result.created,
+      dedupedRecord: !result.created,
+    };
   }
 
-  generateCandidates(
+  acceptCandidate(candidate: MemoryCandidate): MemoryRecord | null {
+    return this.acceptCandidateWithResult(candidate).record;
+  }
+
+  generateCandidatesWithSummary(
     actorRunId: string,
     actorId: string,
     input: CandidateInput
-  ): MemoryCandidate[] {
+  ): CandidateGenerationResult {
     const extractionInput: MemoryExtractionInput = {
       actorRunId,
       actorId,
@@ -293,16 +341,41 @@ export class MemoryService {
     };
 
     const extracted = memoryExtractor.extract(extractionInput);
+    const summary = emptyWriteSummary();
+    summary.extractedCandidates = extracted.length;
+
     const uniqueCandidates: MemoryCandidate[] = [];
     const seen = new Set<string>();
     for (const candidate of extracted) {
       const fp = memoryFingerprint(candidate);
-      if (seen.has(fp)) continue;
+      if (seen.has(fp)) {
+        summary.skippedBatchDuplicates++;
+        continue;
+      }
+
       seen.add(fp);
       uniqueCandidates.push(candidate);
-      this.acceptCandidate(candidate);
+      const result = this.acceptCandidateWithResult(candidate);
+
+      if (result.action === "duplicate_candidate") summary.skippedGlobalCandidateDuplicates++;
+      if (result.action === "candidate_only") summary.candidateOnlyCandidates++;
+      if (result.action === "reject") summary.rejectedCandidates++;
+      if (result.action === "auto_accept") summary.acceptedCandidates++;
+      if (result.createdRecord) summary.createdRecords++;
+      if (result.dedupedRecord) summary.dedupedRecords++;
     }
-    return uniqueCandidates;
+
+    summary.uniqueCandidates = uniqueCandidates.length;
+    this.lastWriteSummary = summary;
+    return { candidates: uniqueCandidates, summary };
+  }
+
+  generateCandidates(
+    actorRunId: string,
+    actorId: string,
+    input: CandidateInput
+  ): MemoryCandidate[] {
+    return this.generateCandidatesWithSummary(actorRunId, actorId, input).candidates;
   }
 
   getAllMemories(): MemoryRecord[] {
@@ -313,11 +386,12 @@ export class MemoryService {
     return [...this.candidates];
   }
 
-  getStats(): { memoryCount: number; candidateCount: number; activeMemoryCount: number } {
+  getStats(): MemoryServiceStats {
     return {
       memoryCount: this.memories.length,
       candidateCount: this.candidates.length,
       activeMemoryCount: this.memories.filter((m) => m.status === "active").length,
+      lastWriteSummary: this.lastWriteSummary,
     };
   }
 
@@ -326,6 +400,7 @@ export class MemoryService {
     this.candidates = [];
     this.memoryFingerprints.clear();
     this.candidateFingerprints.clear();
+    this.lastWriteSummary = null;
     memoryCounter = 0;
     memoryExtractor.reset();
   }
