@@ -1,15 +1,22 @@
 // ============================================================================
-// MemoryService — 内存记忆服务
-// v0.1.2: MemoryCandidate 从实践数据提炼：
-//         工具结果 + Actor 判断 + 审批修正 + 最终结果
+// MemoryService — 内存混合记忆服务
+// v0.3.0: Working / Structured / Semantic / Episodic / Procedural / Governance
 // ============================================================================
 
-import { MemoryEntry, MemoryCandidate } from "../core/types/memory";
+import {
+  HybridMemoryView,
+  MemoryCandidate,
+  MemoryRecord,
+  MemoryRetrievalInput,
+  MemoryRetrievalResult,
+  MemoryType,
+} from "../core/types/memory";
 import { ActorProfile } from "../core/types/actor";
 import { ToolObservation } from "../core/types/tool";
+import { memoryExtractor, MemoryExtractionInput } from "./memory-extractor";
+import { memoryPolicy } from "./memory-policy";
 
 let memoryCounter = 0;
-let candidateCounter = 0;
 
 export interface CandidateInput {
   inputText: string;
@@ -17,14 +24,52 @@ export interface CandidateInput {
   observations: ToolObservation[];
   actorMemory: string[];
   approvalJudgment: { mustRequestApprovalWhen: string[] };
+  organizationId?: string;
+  unitId?: string;
+  sceneId?: string;
+}
+
+function typeBucket(type: MemoryType): keyof Omit<HybridMemoryView,
+  "working" | "organizationPublic" | "unitMemory" | "actorPrivate" | "sceneShared"> {
+  if (type === "episodic" || type === "run_summary") return "episodic";
+  if (type === "procedural") return "procedural";
+  if (type === "governance" || type === "approval_lesson") return "governance";
+  if (type === "structured" || type === "policy_hint") return "structured";
+  return "semantic";
+}
+
+function scoreMemory(record: MemoryRecord, query?: string): number {
+  let score = 0;
+  const content = record.content.toLowerCase();
+  const q = (query ?? "").toLowerCase();
+
+  if (q) {
+    for (const token of q.split(/\s+|，|。|、|；|：|,|\.|;/).filter(Boolean)) {
+      if (content.includes(token)) score += 2;
+    }
+    if (/扫码枪|扫描枪|scanner/i.test(q) && /扫码枪|扫描枪|scanner/i.test(content)) score += 5;
+    if (/退款/.test(q) && /退款/.test(content)) score += 5;
+    if (/连不上|连接|无法连接/.test(q) && /连接|连不上|无法连接/.test(content)) score += 5;
+  }
+
+  score += (record.importance ?? 0.5) * 3;
+  score += (record.confidence ?? 0.5) * 2;
+  score += Math.min(record.useCount ?? 0, 5) * 0.5;
+  return score;
 }
 
 export class MemoryService {
-  private memories: MemoryEntry[] = [];
+  private memories: MemoryRecord[] = [];
+  private candidates: MemoryCandidate[] = [];
 
-  addMemory(entry: Omit<MemoryEntry, "memoryId" | "createdAt">): MemoryEntry {
-    const memory: MemoryEntry = {
-      ...entry, memoryId: `mem_${++memoryCounter}`, createdAt: new Date().toISOString(),
+  addMemory(entry: Omit<MemoryRecord, "memoryId" | "createdAt">): MemoryRecord {
+    const now = new Date().toISOString();
+    const memory: MemoryRecord = {
+      ...entry,
+      memoryId: `mem_${++memoryCounter}`,
+      createdAt: now,
+      updatedAt: now,
+      useCount: entry.useCount ?? 0,
     };
     this.memories.push(memory);
     return memory;
@@ -50,146 +95,127 @@ export class MemoryService {
 
   initActorMemory(actor: ActorProfile, memoryStrings: string[]): void {
     for (const content of memoryStrings) {
+      const exists = this.memories.some((m) =>
+        m.actorId === actor.actorId && m.scope === "actor_private" && m.content === content && m.status === "active"
+      );
+      if (exists) continue;
       this.addMemory({
-        organizationId: actor.organizationId, actorId: actor.actorId,
-        scope: "actor_private", type: "procedural", content, status: "active",
+        organizationId: actor.organizationId,
+        unitId: actor.unitId,
+        actorId: actor.actorId,
+        scope: "actor_private",
+        type: "procedural",
+        content,
+        status: "active",
+        confidence: 1,
+        importance: 0.8,
+        sourceType: "seed",
+        visibility: "actor_private",
       });
     }
   }
 
-  /**
-   * 从实践数据生成记忆候选
-   * 提炼维度：工具结果模式、Actor 判断逻辑、审批触发场景
-   */
+  retrieve(input: MemoryRetrievalInput): MemoryRetrievalResult {
+    const topK = input.topK ?? 8;
+    const accessible = this.memories.filter((m) => {
+      if (m.status !== "active" && m.status !== "approved") return false;
+      if (m.organizationId !== input.organizationId) return false;
+      if (m.scope === "organization_public") return true;
+      if (m.scope === "unit") return Boolean(input.unitId && m.unitId === input.unitId);
+      if (m.scope === "actor_private") return m.actorId === input.actorId;
+      if (m.scope === "scene_shared") return Boolean(input.sceneId && m.sceneId === input.sceneId);
+      return false;
+    });
+
+    const records = accessible
+      .map((record) => ({ record, score: scoreMemory(record, input.query) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK)
+      .map(({ record }) => {
+        record.useCount = (record.useCount ?? 0) + 1;
+        record.lastUsedAt = new Date().toISOString();
+        return record;
+      });
+
+    return { records, view: this.toHybridView(records) };
+  }
+
+  toHybridView(records: MemoryRecord[]): HybridMemoryView {
+    const view: HybridMemoryView = {
+      working: {},
+      organizationPublic: [],
+      unitMemory: [],
+      actorPrivate: [],
+      sceneShared: {},
+      structured: [],
+      semantic: [],
+      episodic: [],
+      procedural: [],
+      governance: [],
+    };
+
+    for (const record of records) {
+      if (record.scope === "organization_public") view.organizationPublic.push(record.content);
+      if (record.scope === "unit") view.unitMemory.push(record.content);
+      if (record.scope === "actor_private") view.actorPrivate.push(record.content);
+      if (record.scope === "scene_shared") view.sceneShared[record.memoryId] = record.structuredData ?? record.content;
+
+      const bucket = typeBucket(record.type);
+      view[bucket].push(record.content);
+    }
+
+    return view;
+  }
+
+  acceptCandidate(candidate: MemoryCandidate): MemoryRecord | null {
+    const decision = memoryPolicy.decide(candidate);
+    this.candidates.push({ ...candidate, status: decision.action === "reject" ? "rejected" : "candidate" });
+
+    if (decision.action !== "auto_accept") {
+      return null;
+    }
+
+    return this.addMemory(memoryPolicy.toRecord(candidate, decision.status));
+  }
+
   generateCandidates(
     actorRunId: string,
     actorId: string,
     input: CandidateInput
   ): MemoryCandidate[] {
-    const candidates: MemoryCandidate[] = [];
-    const text = input.inputText;
+    const extractionInput: MemoryExtractionInput = {
+      actorRunId,
+      actorId,
+      organizationId: input.organizationId,
+      unitId: input.unitId,
+      sceneId: input.sceneId,
+      inputText: input.inputText,
+      finalResult: input.finalResult,
+      observations: input.observations,
+      actorMemory: input.actorMemory,
+      approvalJudgment: input.approvalJudgment,
+    };
 
-    // 1. 模式提炼：从工具结果和输入中识别关联模式
-    const patterns = this.extractPatterns(text, input.observations, input.finalResult);
-    for (const p of patterns) {
-      candidates.push({
-        candidateId: `cand_${++candidateCounter}`,
-        actorRunId, actorId,
-        scope: "actor_private",
-        type: "case_pattern",
-        content: p,
-        confidence: 0.8,
-        createdAt: new Date().toISOString(),
-      });
+    const candidates = memoryExtractor.extract(extractionInput);
+    for (const candidate of candidates) {
+      this.acceptCandidate(candidate);
     }
-
-    // 2. 程序性知识：从审批触发中提炼
-    const procedural = this.extractProcedural(text, input);
-    for (const p of procedural) {
-      candidates.push({
-        candidateId: `cand_${++candidateCounter}`,
-        actorRunId, actorId,
-        scope: "actor_private",
-        type: "procedural",
-        content: p,
-        confidence: 0.75,
-        createdAt: new Date().toISOString(),
-      });
-    }
-
-    // 3. 汇总摘要
-    if (input.finalResult?.summary) {
-      candidates.push({
-        candidateId: `cand_${++candidateCounter}`,
-        actorRunId, actorId,
-        scope: "actor_private",
-        type: "run_summary",
-        content: `[${new Date().toISOString()}] ${input.finalResult.summary}: ${text}`,
-        confidence: 0.6,
-        createdAt: new Date().toISOString(),
-      });
-    }
-
     return candidates;
   }
 
-  // -----------------------------------------------------------------------
-  // 提炼逻辑
-  // -----------------------------------------------------------------------
-
-  private extractPatterns(
-    text: string,
-    observations: ToolObservation[],
-    finalResult: Record<string, unknown> | null
-  ): string[] {
-    const patterns: string[] = [];
-
-    const hasRefund = /退款/.test(text);
-    const hasConnection = /连不上|连接|无法连接/.test(text);
-    const hasScanner = /扫码枪|扫描枪|scanner/i.test(text);
-
-    // 模式：扫码枪问题 + 退款 → 多线处理
-    if (hasScanner && hasRefund && hasConnection) {
-      patterns.push(
-        "扫码枪连接问题常同时涉及技术排查、售后判断和退款风险，应触发多线并行处理。"
-      );
-    }
-
-    // 模式：设备连接 + 历史工单
-    const ticketObs = observations.find((o) => o.toolName === "query_ticket_history");
-    if (ticketObs?.data) {
-      const tickets = (ticketObs.data as Record<string, unknown>).tickets as Array<Record<string, unknown>> | undefined;
-      if (tickets && tickets.length > 0 && hasConnection) {
-        patterns.push(
-          "设备连接类问题在历史工单中重复出现时，应考虑升级为产品缺陷而非个例处理。"
-        );
-      }
-    }
-
-    // 模式：退款 + 在保
-    const orderObs = observations.find((o) => o.toolName === "query_order_info");
-    if (orderObs?.data) {
-      const orderData = orderObs.data as Record<string, unknown>;
-      if (orderData.warrantyStatus === "in_warranty" && hasRefund) {
-        patterns.push(
-          "在保设备出现退款诉求时，应先走售后换修流程，退款作为最后选项。"
-        );
-      }
-    }
-
-    return patterns;
+  getAllMemories(): MemoryRecord[] {
+    return [...this.memories];
   }
 
-  private extractProcedural(
-    text: string,
-    input: CandidateInput
-  ): string[] {
-    const procedural: string[] = [];
-
-    // 退款话语规范
-    if (/退款/.test(text)) {
-      const hasRule = input.actorMemory.some((m) => /退款.*承诺/.test(m));
-      if (hasRule) {
-        procedural.push(
-          '涉及退款诉求时，客服回复应使用“提交退款申请”或“等待财务确认”，避免承诺退款已完成。'
-        );
-      }
-    }
-
-    // urgent 审批触发
-    if (input.approvalJudgment.mustRequestApprovalWhen.some((r) => /urgent/.test(r))) {
-      procedural.push(
-        "创建 urgent 优先级工单需经审批，确保 urgent 标签不被滥用。"
-      );
-    }
-
-    return procedural;
+  getCandidates(): MemoryCandidate[] {
+    return [...this.candidates];
   }
 
   clear(): void {
     this.memories = [];
+    this.candidates = [];
     memoryCounter = 0;
-    candidateCounter = 0;
+    memoryExtractor.reset();
   }
 }
 
