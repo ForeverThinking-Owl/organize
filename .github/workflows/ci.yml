@@ -40,3 +40,6 @@ jobs:
 
       - name: Memory Store Demo
         run: npm run demo:memory:store
+
+      - name: Skill Runtime Semantics Demo
+        run: npm run demo:skill
