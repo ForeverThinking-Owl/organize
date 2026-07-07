@@ -1,10 +1,22 @@
 // ============================================================================
 // ActorRuntime — Actor Kernel 主执行器
-// v0.3.2: ActorContextBuilder 接入 Hybrid Memory；记录 Memory 写入观测摘要
+// v0.3.5: 严格 SkillConfig 解析，transform 一等执行，unsupported step 显式失败
 // ============================================================================
 
 import { ActorConfig } from "../core/types/actor";
-import { Skill, SkillConfig, ToolCallStep, LLMJudgeStep, ReturnStep, TransformStep } from "../core/types/skill";
+import {
+  Skill,
+  SkillConfig,
+  SkillStep,
+  SkillStepConfig,
+  ToolCallStep,
+  LLMJudgeStep,
+  ReturnStep,
+  TransformStep,
+  HumanInputStep,
+  WaitApprovalStep,
+  EndStep,
+} from "../core/types/skill";
 import { ToolCallRequest } from "../core/types/tool";
 import { ApprovalDecision } from "../core/types/approval";
 import { actorContextBuilder } from "./actor-context-builder";
@@ -64,30 +76,124 @@ let runCounter = 0;
 // SkillConfig → Skill
 // ---------------------------------------------------------------------------
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function requiredString(config: SkillStepConfig, key: string): string {
+  const value = config[key];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Skill step ${config.step_key} (${config.type}) requires string field: ${key}`);
+  }
+  return value;
+}
+
+function optionalString(config: SkillStepConfig, key: string): string | undefined {
+  const value = config[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") {
+    throw new Error(`Skill step ${config.step_key} (${config.type}) field ${key} must be a string`);
+  }
+  return value;
+}
+
+function requiredMapping(config: SkillStepConfig, key: string): Record<string, string> {
+  const value = config[key];
+  if (!isRecord(value)) {
+    throw new Error(`Skill step ${config.step_key} (${config.type}) requires mapping field: ${key}`);
+  }
+  for (const [mappingKey, mappingValue] of Object.entries(value)) {
+    if (typeof mappingValue !== "string") {
+      throw new Error(`Skill step ${config.step_key} (${config.type}) mapping ${key}.${mappingKey} must be a string`);
+    }
+  }
+  return value as Record<string, string>;
+}
+
+function optionalMapping(config: SkillStepConfig, key: string): Record<string, string> | undefined {
+  const value = config[key];
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new Error(`Skill step ${config.step_key} (${config.type}) field ${key} must be a mapping`);
+  }
+  for (const [mappingKey, mappingValue] of Object.entries(value)) {
+    if (typeof mappingValue !== "string") {
+      throw new Error(`Skill step ${config.step_key} (${config.type}) mapping ${key}.${mappingKey} must be a string`);
+    }
+  }
+  return value as Record<string, string>;
+}
+
+function parseSkillStep(config: SkillStepConfig): SkillStep {
+  const base = {
+    stepKey: config.step_key,
+    description: optionalString(config, "description"),
+  };
+
+  switch (config.type) {
+    case "tool_call":
+      return {
+        ...base,
+        type: "tool_call",
+        toolName: requiredString(config, "tool_name"),
+        inputMapping: requiredMapping(config, "input_mapping"),
+        outputKey: requiredString(config, "output_key"),
+      } as ToolCallStep;
+
+    case "llm_judge":
+      return {
+        ...base,
+        type: "llm_judge",
+        instruction: requiredString(config, "instruction"),
+        outputKey: requiredString(config, "output_key"),
+        outputSchema: isRecord(config.output_schema) ? config.output_schema : undefined,
+      } as LLMJudgeStep;
+
+    case "transform":
+      return {
+        ...base,
+        type: "transform",
+        mapping: requiredMapping(config, "mapping"),
+        outputKey: requiredString(config, "output_key"),
+      } as TransformStep;
+
+    case "return":
+      return {
+        ...base,
+        type: "return",
+        outputMapping: optionalMapping(config, "output_mapping"),
+      } as ReturnStep;
+
+    case "human_input":
+      return {
+        ...base,
+        type: "human_input",
+        prompt: requiredString(config, "prompt"),
+        outputKey: requiredString(config, "output_key"),
+      } as HumanInputStep;
+
+    case "wait_approval":
+      return {
+        ...base,
+        type: "wait_approval",
+        approvalRequestId: requiredString(config, "approval_request_id"),
+      } as WaitApprovalStep;
+
+    case "end":
+      return { ...base, type: "end" } as EndStep;
+
+    default:
+      throw new Error(`Unsupported skill step type: ${String(config.type)} at step ${config.step_key}`);
+  }
+}
+
 function parseSkill(config: SkillConfig, actorId: string): Skill {
   return {
-    skillId: config.skill_id, name: config.name, description: config.description,
+    skillId: config.skill_id,
+    name: config.name,
+    description: config.description,
     ownerActorId: config.owner_actor_id ?? actorId,
-    steps: config.steps.map((s) => {
-      const base = { stepKey: s.step_key, description: s.description as string | undefined };
-      switch (s.type) {
-        case "tool_call":
-          return { ...base, type: "tool_call", toolName: s.tool_name as string,
-            inputMapping: s.input_mapping as Record<string, string>, outputKey: s.output_key as string } as ToolCallStep;
-        case "llm_judge":
-          return { ...base, type: "llm_judge", instruction: s.instruction as string,
-            outputKey: s.output_key as string,
-            outputSchema: s.output_schema as Record<string, unknown> | undefined } as LLMJudgeStep;
-        case "transform":
-          return { ...base, type: "transform",
-            mapping: s.mapping as Record<string, string>, outputKey: s.output_key as string } as TransformStep;
-        case "return":
-          return { ...base, type: "return",
-            outputMapping: s.output_mapping as Record<string, string> | undefined } as ReturnStep;
-        default:
-          return { ...base, type: "return" } as ReturnStep;
-      }
-    }),
+    steps: config.steps.map(parseSkillStep),
   };
 }
 
@@ -104,22 +210,21 @@ export class ActorRuntime {
   async run(input: ActorRunInput): Promise<ActorRunOutput> {
     const actorRunId = `arun_${++runCounter}`;
     const actorId = input.actorConfig.actor_id;
-
-    if (input.actorConfig.memory?.length) {
-      memoryService.initActorMemory(
-        { actorId, organizationId: input.actorConfig.organization_id ?? "org_default",
-          unitId: input.actorConfig.unit_id, type: input.actorConfig.type,
-          name: input.actorConfig.name, role: input.actorConfig.role,
-          responsibility: input.actorConfig.responsibility,
-          autonomyLevel: input.actorConfig.autonomy_level as "L2_read_and_draft", status: "active" },
-        input.actorConfig.memory
-      );
-    }
-
-    const skill = parseSkill(input.skillConfig, actorId);
-    traceLogger.startRun(actorRunId, actorId, skill.skillId);
+    traceLogger.startRun(actorRunId, actorId, input.skillConfig.skill_id);
 
     try {
+      if (input.actorConfig.memory?.length) {
+        memoryService.initActorMemory(
+          { actorId, organizationId: input.actorConfig.organization_id ?? "org_default",
+            unitId: input.actorConfig.unit_id, type: input.actorConfig.type,
+            name: input.actorConfig.name, role: input.actorConfig.role,
+            responsibility: input.actorConfig.responsibility,
+            autonomyLevel: input.actorConfig.autonomy_level as "L2_read_and_draft", status: "active" },
+          input.actorConfig.memory
+        );
+      }
+
+      const skill = parseSkill(input.skillConfig, actorId);
       const context = actorContextBuilder.build(input.actorConfig, input.input, input.runtimeContext ?? {}, actorRunId);
       traceLogger.record(actorRunId, "context_built", {
         actorId, skillId: skill.skillId,
@@ -143,6 +248,8 @@ export class ActorRuntime {
     } catch (error) {
       traceLogger.record(actorRunId, "error", { message: error instanceof Error ? error.message : String(error) });
       traceLogger.endRun(actorRunId, "error");
+      actorDecisionExecutor.removeRun(actorRunId);
+      this.runs.delete(actorRunId);
       return this.buildOutput(actorRunId, "error", null);
     }
   }
@@ -191,6 +298,19 @@ export class ActorRuntime {
     while (state.status === "running") {
       const step = skillRuntime.getCurrentStep(skill, state);
       if (!step) { state.status = "completed"; break; }
+
+      if (step.type === "transform") {
+        skillRuntime.executeTransform(step as TransformStep, state, actorRunId);
+        skillRuntime.advanceStep(state);
+        continue;
+      }
+
+      if (step.type === "human_input" || step.type === "wait_approval" || step.type === "end") {
+        const message = `Unsupported runtime skill step type: ${step.type}`;
+        traceLogger.record(actorRunId, "error", { message, stepKey: step.stepKey });
+        state.status = "error";
+        break;
+      }
 
       if (step.type === "llm_judge") {
         const judgeStep = step as LLMJudgeStep;

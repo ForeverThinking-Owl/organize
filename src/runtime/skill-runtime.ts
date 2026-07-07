@@ -1,8 +1,7 @@
 // ============================================================================
 // SkillRuntime — Skill 执行器
 // 按步骤执行 Skill，管理步骤间的输入输出映射
-// v0.1.2: buildToolCallRequest 从 executeToolCall 中拆出，
-//         统一 ToolCall 管线在 ActorDecisionExecutor 中组装
+// v0.3.5: 模板解析支持 context / steps / outputs，保留原始值用于 return output_mapping
 // ============================================================================
 
 import {
@@ -29,20 +28,62 @@ export interface SkillState {
   observations: ToolObservation[];
 }
 
-/** 模板解析：将 "{{context.order_id}}" 替换为实际值 */
-export function resolveTemplate(template: string, state: SkillState): string {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function templateScope(state: SkillState): Record<string, unknown> {
+  const embeddedContext = isRecord(state.context.context) ? state.context.context : {};
+  return {
+    context: { ...state.context, ...embeddedContext },
+    steps: state.steps,
+    outputs: state.outputs,
+  };
+}
+
+function readPath(path: string, state: SkillState): unknown {
+  const parts = path.trim().split(".").filter(Boolean);
+  if (parts.length === 0) return undefined;
+
+  let value: unknown = templateScope(state)[parts[0]];
+  for (const part of parts.slice(1)) {
+    if (!isRecord(value)) return undefined;
+    value = value[part];
+  }
+  return value;
+}
+
+function stringifyTemplateValue(value: unknown, fallback: string): string {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
+/**
+ * 解析模板并保留完整占位符的原始值。
+ *
+ * - "{{context.order_id}}" → 原始值
+ * - "订单 {{context.order_id}}" → 字符串插值
+ * - 支持根路径：context / steps / outputs
+ */
+export function resolveTemplateValue(template: string, state: SkillState): unknown {
+  const fullMatch = template.match(/^\s*\{\{([^}]+)\}\}\s*$/);
+  if (fullMatch) {
+    const value = readPath(fullMatch[1], state);
+    return value ?? `{{${fullMatch[1].trim()}}}`;
+  }
+
   return template.replace(/\{\{([^}]+)\}\}/g, (_, path: string) => {
-    const parts = path.trim().split(".");
-    let value: unknown = state.context;
-    for (const part of parts) {
-      if (value && typeof value === "object") {
-        value = (value as Record<string, unknown>)[part];
-      } else {
-        return `{{${path}}}`;
-      }
-    }
-    return String(value ?? `{{${path}}}`);
+    const fallback = `{{${path}}}`;
+    const value = readPath(path, state);
+    return stringifyTemplateValue(value, fallback);
   });
+}
+
+/** 模板解析：将 "{{context.order_id}}" 替换为字符串值 */
+export function resolveTemplate(template: string, state: SkillState): string {
+  return stringifyTemplateValue(resolveTemplateValue(template, state), template);
 }
 
 /**
@@ -57,7 +98,7 @@ export function buildToolCallRequest(
 ): ToolCallRequest {
   const resolvedArgs: Record<string, unknown> = {};
   for (const [key, template] of Object.entries(step.inputMapping)) {
-    resolvedArgs[key] = resolveTemplate(template, state);
+    resolvedArgs[key] = resolveTemplateValue(template, state);
   }
 
   return {
@@ -105,9 +146,6 @@ export class SkillRuntime {
     });
   }
 
-  /**
-   * 记录 tool_call 步骤完成，将结果写入 state
-   */
   /**
    * 记录 tool_call 步骤完成（仅 trace，state 写入由 ActorDecisionExecutor 负责）
    */
@@ -161,13 +199,14 @@ export class SkillRuntime {
 
     const result: Record<string, unknown> = {};
     for (const [key, template] of Object.entries(step.mapping)) {
-      result[key] = resolveTemplate(template, state);
+      result[key] = resolveTemplateValue(template, state);
     }
     state.steps[step.stepKey] = result;
     state.outputs[step.outputKey] = result;
 
     traceLogger.record(actorRunId, "skill_step_end", {
       stepKey: step.stepKey,
+      outputKey: step.outputKey,
     });
   }
 
