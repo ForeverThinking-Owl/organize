@@ -1,6 +1,6 @@
 // ============================================================================
 // ActorRuntime — Actor Kernel 主执行器
-// v0.3.5: 严格 SkillConfig 解析，transform 一等执行，unsupported step 显式失败
+// v0.3.6: Runtime 可选绑定 MemoryStore，运行前 load，运行后 save
 // ============================================================================
 
 import { ActorConfig } from "../core/types/actor";
@@ -19,22 +19,30 @@ import {
 } from "../core/types/skill";
 import { ToolCallRequest } from "../core/types/tool";
 import { ApprovalDecision } from "../core/types/approval";
+import type { MemoryStore } from "../memory/memory-store";
 import { actorContextBuilder } from "./actor-context-builder";
 import { skillRuntime, SkillState, buildToolCallRequest } from "./skill-runtime";
 import { actorDecisionEngine } from "./actor-decision-engine";
 import { actorDecisionExecutor } from "./actor-decision-executor";
 import { memoryService } from "../memory/memory-service";
 import { traceLogger } from "../trace/trace-logger";
+import { loadRuntimeMemoryStore, saveRuntimeMemoryStore } from "./runtime-memory-store";
 
 // ---------------------------------------------------------------------------
 // 类型
 // ---------------------------------------------------------------------------
+
+export interface ActorRuntimeOptions {
+  /** Optional store-backed memory lifecycle for this run. */
+  memoryStore?: MemoryStore;
+}
 
 export interface ActorRunInput {
   actorConfig: ActorConfig;
   skillConfig: SkillConfig;
   input: { text?: string; payload?: Record<string, unknown> };
   runtimeContext?: Record<string, unknown>;
+  runtimeOptions?: ActorRuntimeOptions;
 }
 
 export interface ActorRunOutput {
@@ -205,14 +213,21 @@ export class ActorRuntime {
   private runs: Map<string, {
     skill: Skill; state: SkillState;
     context: ReturnType<typeof actorContextBuilder.build>;
+    memoryStore?: MemoryStore;
   }> = new Map();
 
   async run(input: ActorRunInput): Promise<ActorRunOutput> {
     const actorRunId = `arun_${++runCounter}`;
     const actorId = input.actorConfig.actor_id;
+    const memoryStore = input.runtimeOptions?.memoryStore;
     traceLogger.startRun(actorRunId, actorId, input.skillConfig.skill_id);
 
     try {
+      const memoryLoaded = await loadRuntimeMemoryStore(actorRunId, memoryStore);
+      if (!memoryLoaded) {
+        throw new Error("MemoryStore load failed");
+      }
+
       if (input.actorConfig.memory?.length) {
         memoryService.initActorMemory(
           { actorId, organizationId: input.actorConfig.organization_id ?? "org_default",
@@ -242,9 +257,9 @@ export class ActorRuntime {
       });
 
       actorDecisionExecutor.registerRun({ actorRunId, actorId, context, state, pendingExec: null });
-      this.runs.set(actorRunId, { skill, state, context });
+      this.runs.set(actorRunId, { skill, state, context, memoryStore });
 
-      return await this.executeLoop(actorRunId, actorId, context, state, skill);
+      return await this.executeLoop(actorRunId, actorId, context, state, skill, memoryStore);
     } catch (error) {
       traceLogger.record(actorRunId, "error", { message: error instanceof Error ? error.message : String(error) });
       traceLogger.endRun(actorRunId, "error");
@@ -264,7 +279,7 @@ export class ActorRuntime {
         trace: { actorRunId, eventCount: 0, events: [] } };
     }
 
-    const { context, state, skill } = saved;
+    const { context, state, skill, memoryStore } = saved;
     const actorId = context.actor.actorId;
 
     if (event.type === "approval_decision") {
@@ -277,11 +292,11 @@ export class ActorRuntime {
       if (execResult.outcome === "completed") {
         state.status = "running";
         skillRuntime.advanceStep(state);
-        return await this.executeLoop(actorRunId, actorId, context, state, skill);
+        return await this.executeLoop(actorRunId, actorId, context, state, skill, memoryStore);
       }
     }
 
-    return await this.executeLoop(actorRunId, actorId, context, state, skill);
+    return await this.executeLoop(actorRunId, actorId, context, state, skill, memoryStore);
   }
 
   // -----------------------------------------------------------------------
@@ -291,7 +306,8 @@ export class ActorRuntime {
   private async executeLoop(
     actorRunId: string, actorId: string,
     context: ReturnType<typeof actorContextBuilder.build>,
-    state: SkillState, skill: Skill
+    state: SkillState, skill: Skill,
+    memoryStore?: MemoryStore
   ): Promise<ActorRunOutput> {
     let finalResult: Record<string, unknown> | null = null;
 
@@ -395,6 +411,11 @@ export class ActorRuntime {
     }
 
     traceLogger.record(actorRunId, "memory_write_summary", memoryGeneration.summary as unknown as Record<string, unknown>);
+
+    const memorySaved = await saveRuntimeMemoryStore(actorRunId, memoryStore);
+    if (!memorySaved) {
+      state.status = "error";
+    }
 
     const endStatus = state.status === "waiting_approval" ? "waiting_approval"
       : state.status === "completed" ? "completed" : "error";

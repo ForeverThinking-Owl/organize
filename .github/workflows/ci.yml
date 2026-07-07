@@ -43,3 +43,6 @@ jobs:
 
       - name: Skill Runtime Semantics Demo
         run: npm run demo:skill
+
+      - name: Runtime Store Binding Demo
+        run: npm run demo:runtime:store
