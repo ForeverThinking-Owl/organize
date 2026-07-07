@@ -1,6 +1,6 @@
 {
   "name": "@foreverthinking/organize",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Self-Operating Organization Actor Kernel",
   "private": true,
   "scripts": {
