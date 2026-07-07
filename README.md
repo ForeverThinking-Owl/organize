@@ -27,10 +27,10 @@ AI 判断 5W1H（何时、何地、何事、何因、何人、如何）
 ## 当前版本
 
 ```text
-v0.2.0 — Real LLM Integration
+v0.2.1 — LLM Integration Hardening
 ```
 
-v0.2.0 在保持 Actor Kernel 边界不变的前提下，把 llm_judge 从 mock keyword 判断升级为 LLMGateway 结构化判断。PolicyEngine、ApprovalGate、ToolGateway、MemoryService 仍然保持外部治理边界。
+v0.2.1 在 v0.2.0 Real LLM Integration 的基础上加固 LLM 接入层：增加 CI、轻量 `.env` 加载、LLM retry、结构化输出失败后的可控 fallback 边界。Actor Kernel 边界保持不变，PolicyEngine、ApprovalGate、ToolGateway、MemoryService 仍然在模型边界之外执行治理。
 
 ## 快速开始
 
@@ -84,10 +84,10 @@ Results crystallize as memory → next practice gets better
 ## Current Version
 
 ```text
-v0.2.0 — Real LLM Integration
+v0.2.1 — LLM Integration Hardening
 ```
 
-v0.2.0 replaces mock keyword judgment in llm_judge with LLMGateway structured judgment while preserving Actor Kernel boundaries. PolicyEngine, ApprovalGate, ToolGateway and MemoryService remain outside the model boundary.
+v0.2.1 hardens the LLM integration layer after v0.2.0 Real LLM Integration: CI, lightweight `.env` loading, LLM retry, and controlled fallback boundaries for structured-output failures. Actor Kernel boundaries remain unchanged. PolicyEngine, ApprovalGate, ToolGateway and MemoryService continue to operate outside the model boundary.
 
 ## Quick Start
 
