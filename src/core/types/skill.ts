@@ -65,7 +65,9 @@ export interface HumanInputStep extends SkillStepBase {
 
 export interface WaitApprovalStep extends SkillStepBase {
   type: "wait_approval";
-  approvalRequestId: string;
+  approvalRequestId?: string;
+  reason: string;
+  outputKey: string;
 }
 
 export interface EndStep extends SkillStepBase {

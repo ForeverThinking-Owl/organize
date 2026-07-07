@@ -1,6 +1,6 @@
 // ============================================================================
 // ActorRuntime — Actor Kernel 主执行器
-// v0.3.8: human_input 支持 waiting / continue 运行语义
+// v0.3.9: wait_approval 支持一等 Skill waiting / continue 语义
 // ============================================================================
 
 import { ActorConfig } from "../core/types/actor";
@@ -18,7 +18,7 @@ import {
   EndStep,
 } from "../core/types/skill";
 import { ToolCallRequest } from "../core/types/tool";
-import { ApprovalDecision } from "../core/types/approval";
+import type { ApprovalDecision, ApprovalRequest } from "../core/types/approval";
 import type { MemoryStore } from "../memory/memory-store";
 import { actorContextBuilder } from "./actor-context-builder";
 import { skillRuntime, SkillState, buildToolCallRequest } from "./skill-runtime";
@@ -33,6 +33,12 @@ import {
   type HumanInputRequest,
   type HumanInputResponse,
 } from "./human-input-runtime";
+import {
+  applySkillApprovalDecision,
+  approvalAllowsResume,
+  buildSkillApprovalRequest,
+  type SkillApprovalRequest,
+} from "./wait-approval-runtime";
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -53,15 +59,20 @@ export interface ActorRunInput {
 
 export type ActorRunStatus = "completed" | "waiting_approval" | "waiting_human_input" | "error";
 
+export interface PendingApprovalOutput {
+  approvalRequestId: string;
+  reason: string;
+  approvalKind: "tool_call" | "skill_step";
+  toolName?: string;
+  stepKey?: string;
+  outputKey?: string;
+}
+
 export interface ActorRunOutput {
   actorRunId: string;
   status: ActorRunStatus;
   result: Record<string, unknown> | null;
-  pendingApproval?: {
-    approvalRequestId: string;
-    toolName: string;
-    reason: string;
-  };
+  pendingApproval?: PendingApprovalOutput;
   pendingHumanInput?: HumanInputRequest;
   toolCalls: Array<{
     toolCallId: string;
@@ -197,7 +208,9 @@ function parseSkillStep(config: SkillStepConfig): SkillStep {
       return {
         ...base,
         type: "wait_approval",
-        approvalRequestId: requiredString(config, "approval_request_id"),
+        approvalRequestId: optionalString(config, "approval_request_id"),
+        reason: requiredString(config, "reason"),
+        outputKey: requiredString(config, "output_key"),
       } as WaitApprovalStep;
 
     case "end":
@@ -228,6 +241,7 @@ export class ActorRuntime {
     context: ReturnType<typeof actorContextBuilder.build>;
     memoryStore?: MemoryStore;
     pendingHumanInput?: HumanInputRequest;
+    pendingSkillApproval?: SkillApprovalRequest;
   }> = new Map();
 
   async run(input: ActorRunInput): Promise<ActorRunOutput> {
@@ -297,6 +311,35 @@ export class ActorRuntime {
     const actorId = context.actor.actorId;
 
     if (event.type === "approval_decision") {
+      if (saved.pendingSkillApproval) {
+        const pending = saved.pendingSkillApproval;
+        if (pending.approvalRequestId !== event.decision.approvalRequestId) {
+          const message = `Skill approval response id mismatch: ${event.decision.approvalRequestId}`;
+          traceLogger.record(actorRunId, "error", { message });
+          state.status = "error";
+          traceLogger.endRun(actorRunId, "error");
+          actorDecisionExecutor.removeRun(actorRunId);
+          this.runs.delete(actorRunId);
+          return this.buildOutput(actorRunId, "error", null);
+        }
+
+        applySkillApprovalDecision(pending, event.decision, state, actorRunId);
+        saved.pendingSkillApproval = undefined;
+
+        if (!approvalAllowsResume(event.decision)) {
+          state.status = "error";
+          traceLogger.record(actorRunId, "error", { message: `Skill approval did not approve resume: ${event.decision.decision}` });
+          traceLogger.endRun(actorRunId, "error");
+          actorDecisionExecutor.removeRun(actorRunId);
+          this.runs.delete(actorRunId);
+          return this.buildOutput(actorRunId, "error", null);
+        }
+
+        state.status = "running";
+        skillRuntime.advanceStep(state);
+        return await this.executeLoop(actorRunId, actorId, context, state, skill, memoryStore);
+      }
+
       const execResult = await actorDecisionExecutor.continueAfterApproval(actorRunId, event.decision);
       if (execResult.outcome === "error") {
         state.status = "error";
@@ -365,7 +408,16 @@ export class ActorRuntime {
         return this.buildOutput(actorRunId, "waiting_human_input", null, undefined, undefined, request);
       }
 
-      if (step.type === "wait_approval" || step.type === "end") {
+      if (step.type === "wait_approval") {
+        const request = buildSkillApprovalRequest(step as WaitApprovalStep, actorRunId);
+        const saved = this.runs.get(actorRunId);
+        if (saved) saved.pendingSkillApproval = request;
+        state.status = "waiting_approval";
+        traceLogger.endRun(actorRunId, "waiting_approval");
+        return this.buildOutput(actorRunId, "waiting_approval", null, request);
+      }
+
+      if (step.type === "end") {
         const message = `Unsupported runtime skill step type: ${step.type}`;
         traceLogger.record(actorRunId, "error", { message, stepKey: step.stepKey });
         state.status = "error";
@@ -472,11 +524,35 @@ export class ActorRuntime {
     return this.buildOutput(actorRunId, endStatus, finalResult, undefined, memoryCandidates);
   }
 
+  private buildPendingApprovalOutput(
+    pendingApproval: ApprovalRequest | SkillApprovalRequest
+  ): PendingApprovalOutput {
+    const maybeSkillApproval = pendingApproval as Partial<SkillApprovalRequest>;
+    if (maybeSkillApproval.approvalKind === "skill_step") {
+      const skillApproval = pendingApproval as SkillApprovalRequest;
+      return {
+        approvalKind: "skill_step",
+        approvalRequestId: skillApproval.approvalRequestId,
+        stepKey: skillApproval.stepKey,
+        outputKey: skillApproval.outputKey,
+        reason: skillApproval.reason,
+      };
+    }
+
+    const toolApproval = pendingApproval as ApprovalRequest;
+    return {
+      approvalKind: "tool_call",
+      approvalRequestId: toolApproval.approvalRequestId,
+      toolName: toolApproval.toolName,
+      reason: toolApproval.reason,
+    };
+  }
+
   private buildOutput(
     actorRunId: string,
     status: ActorRunStatus,
     result: Record<string, unknown> | null,
-    pendingApproval?: import("../core/types/approval").ApprovalRequest,
+    pendingApproval?: ApprovalRequest | SkillApprovalRequest,
     memoryCandidates?: Array<{ candidateId: string; scope: string; type: string; content: string; confidence?: number }>,
     pendingHumanInput?: HumanInputRequest
   ): ActorRunOutput {
@@ -511,11 +587,7 @@ export class ActorRuntime {
 
     return {
       actorRunId, status, result,
-      pendingApproval: pendingApproval ? {
-        approvalRequestId: pendingApproval.approvalRequestId,
-        toolName: pendingApproval.toolName,
-        reason: pendingApproval.reason,
-      } : undefined,
+      pendingApproval: pendingApproval ? this.buildPendingApprovalOutput(pendingApproval) : undefined,
       pendingHumanInput,
       toolCalls,
       approvals,

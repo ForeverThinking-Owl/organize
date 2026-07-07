@@ -52,3 +52,6 @@ jobs:
 
       - name: Human Input Runtime Demo
         run: npm run demo:human:input
+
+      - name: Wait Approval Runtime Demo
+        run: npm run demo:wait:approval
