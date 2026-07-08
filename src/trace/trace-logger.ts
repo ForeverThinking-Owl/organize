@@ -1,6 +1,6 @@
 // ============================================================================
 // TraceLogger — 内存 Trace 记录器
-// v0.3.7: dump / restore TraceSnapshot for persistence
+// v0.4.0: explicit suspend / resume lifecycle for waiting runs
 // ============================================================================
 
 import { TraceEvent, TraceEventType, ActorRunTrace } from "../core/types/trace";
@@ -24,6 +24,9 @@ function maxCounterFromEventIds(traces: ActorRunTrace[]): number {
   return max;
 }
 
+export type RunTerminalStatus = "completed" | "error";
+export type RunWaitingStatus = "waiting_approval" | "waiting_human_input";
+
 export class TraceLogger {
   private traces: Map<string, ActorRunTrace> = new Map();
 
@@ -42,7 +45,27 @@ export class TraceLogger {
     });
   }
 
-  endRun(actorRunId: string, status: ActorRunTrace["status"]): void {
+  suspendRun(
+    actorRunId: string,
+    status: RunWaitingStatus,
+    data: Record<string, unknown> = {}
+  ): void {
+    const trace = this.traces.get(actorRunId);
+    if (trace) {
+      trace.status = status;
+    }
+    this.record(actorRunId, "actor_run_suspended", { status, ...data });
+  }
+
+  resumeRun(actorRunId: string, data: Record<string, unknown> = {}): void {
+    const trace = this.traces.get(actorRunId);
+    if (trace) {
+      trace.status = "running";
+    }
+    this.record(actorRunId, "actor_run_resumed", data);
+  }
+
+  endRun(actorRunId: string, status: RunTerminalStatus): void {
     const trace = this.traces.get(actorRunId);
     if (trace) {
       trace.status = status;

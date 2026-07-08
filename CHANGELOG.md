@@ -8,21 +8,19 @@ README is the project entry point. Version history, verification coverage, and r
 
 ## Current State / 当前状态
 
-Current version: `v0.3.9 — Wait Approval Runtime Semantics`
+Current version: `v0.4.0 — General Waiting / Resume Model`
 
-当前版本：`v0.3.9 — Wait Approval Runtime Semantics`
+当前版本：`v0.4.0 — General Waiting / Resume Model`
 
 | Boundary / 边界 | Status / 状态 |
 |---|---|
-| Actor Kernel | Single-Actor loop supports ToolCall, tool approval, Skill wait_approval, human input, continue, Trace, memory crystallization, store-backed runs, and persistent Trace snapshots. / 单 Actor 闭环已支持 ToolCall、工具审批、Skill wait_approval、human input、continue、Trace、记忆沉淀、Store-backed run 与 Trace 快照持久化。 |
+| Actor Kernel | Single-Actor loop supports ToolCall, tool approval, Skill wait_approval, human input, continue, Trace lifecycle, memory crystallization, store-backed runs, and persistent Trace snapshots. / 单 Actor 闭环已支持 ToolCall、工具审批、Skill wait_approval、human input、continue、Trace 生命周期、记忆沉淀、Store-backed run 与 Trace 快照持久化。 |
+| Waiting / Resume | Human input, Skill approval, and ToolCall approval now share explicit suspend / resume lifecycle Trace events. / human input、Skill approval、ToolCall approval 已统一使用显式 suspend / resume 生命周期 Trace。 |
 | Skill Runtime | Strict step parsing, first-class transform execution, human_input waiting, wait_approval waiting, return output mapping, and explicit unsupported-step errors are available. / 已支持严格 step 解析、transform 一等执行、human_input 等待、wait_approval 等待、return output mapping、未支持步骤显式报错。 |
 | LLM Gateway | Supports mock / real structured-output mode. / 支持 mock / real 结构化输出模式。 |
 | Policy / Approval | Tool permission, autonomy level, before_call approval, and Skill-step approval are wired in. / Tool 权限、自主等级、before_call 审批与 Skill-step 审批已接入。 |
-| Hybrid Memory | Candidate, record, policy, extraction, retrieval, and view are wired in. / 候选、记录、策略、提取、检索与视图已接入。 |
 | Memory Store | `MemoryStore`, `JsonMemoryStore`, and Runtime Store Binding are verified. / `MemoryStore`、`JsonMemoryStore` 与 Runtime Store Binding 已验证。 |
 | Trace Persistence | `TraceSnapshot`, `TraceStore`, `JsonTraceStore`, and TraceLogger dump / restore are verified. / `TraceSnapshot`、`TraceStore`、`JsonTraceStore` 与 TraceLogger dump / restore 已验证。 |
-| Human Input | `human_input` can pause a run, return `pendingHumanInput`, resume through `continue()`, and feed later steps through `steps` / `outputs`. / `human_input` 可暂停运行、返回 `pendingHumanInput`、通过 `continue()` 恢复，并通过 `steps` / `outputs` 供后续步骤读取。 |
-| Wait Approval | `wait_approval` can pause a run, return `pendingApproval`, resume through `continue()`, and feed later steps through `steps` / `outputs`. / `wait_approval` 可暂停运行、返回 `pendingApproval`、通过 `continue()` 恢复，并通过 `steps` / `outputs` 供后续步骤读取。 |
 
 ## Verification Matrix / 验收矩阵
 
@@ -39,28 +37,59 @@ Current version: `v0.3.9 — Wait Approval Runtime Semantics`
 | `npm run demo:trace:persistence` | Trace Persistence demo, 10 checks / Trace Persistence Demo，10 条验收 |
 | `npm run demo:human:input` | Human Input Runtime demo, 10 checks / Human Input Runtime Demo，10 条验收 |
 | `npm run demo:wait:approval` | Wait Approval Runtime demo, 10 checks / Wait Approval Runtime Demo，10 条验收 |
+| `npm run demo:waiting:resume` | General Waiting / Resume demo, 15 checks / 通用等待恢复 Demo，15 条验收 |
 
 ---
 
-## Planned: v0.4.0 — General Waiting / Resume Model
+## Planned: v0.4.1 — Persistent Pending Runs
 
-Goal: unify the waiting boundaries that now exist for human input, Skill-step approval, and ToolCall approval into a clearer run lifecycle model.
+Goal: define what it means to persist a suspended run and later resume it safely.
 
-目标：把 human input、Skill-step approval、ToolCall approval 已经形成的等待边界整理成更清晰的运行生命周期模型。
+目标：定义 suspended run 如何持久化，并在之后安全恢复执行。
 
 Possible scope / 可能范围：
 
-- Add explicit suspend / resume Trace events instead of overloading actor_run_end for waiting states.
-- Normalize pending wait output shapes where appropriate.
-- Clarify which wait types can be persisted and resumed across process boundaries.
+- Add a pending run snapshot boundary for waiting runs.
+- Decide what runtime state must be serializable for resume.
+- Keep Trace / Memory persistence separate but compatible.
 - Keep all existing demos green.
 
 中文可能范围：
 
-- 新增显式 suspend / resume Trace 事件，避免只用 actor_run_end 表示等待态。
-- 在合适范围内规范 pending wait 输出结构。
-- 明确哪些等待类型可以跨进程持久化并恢复。
+- 新增 waiting run 的 pending run snapshot 边界。
+- 明确哪些 Runtime state 必须可序列化才能恢复。
+- 让 Trace / Memory persistence 保持分离但可协同。
 - 保持现有 demos 全部通过。
+
+---
+
+## v0.4.0 — General Waiting / Resume Model
+
+- Added `actor_run_suspended` and `actor_run_resumed` Trace event types.
+- Added `TraceLogger.suspendRun()` and `TraceLogger.resumeRun()`.
+- Restricted `TraceLogger.endRun()` to terminal states: `completed` / `error`.
+- Human input waiting now records `actor_run_suspended(waitingKind=human_input)` instead of `actor_run_end(waiting_human_input)`.
+- Skill wait approval now records `actor_run_suspended(waitingKind=skill_approval)` instead of `actor_run_end(waiting_approval)`.
+- ToolCall approval now records `actor_run_suspended(waitingKind=tool_approval)` instead of `actor_run_end(waiting_approval)`.
+- Continue paths now record `actor_run_resumed` for human input, Skill approval, and ToolCall approval.
+- Updated human input and wait approval demos to validate suspend / resume lifecycle.
+- Added `demo:waiting:resume` with 15 checks across all three waiting boundaries.
+- Added General Waiting Resume Demo to CI.
+- Updated README and package metadata to v0.4.0.
+
+中文：
+
+- 新增 `actor_run_suspended` 与 `actor_run_resumed` Trace 事件类型。
+- 新增 `TraceLogger.suspendRun()` 与 `TraceLogger.resumeRun()`。
+- `TraceLogger.endRun()` 限定为真正终局：`completed` / `error`。
+- human input 等待改为记录 `actor_run_suspended(waitingKind=human_input)`，不再记录 `actor_run_end(waiting_human_input)`。
+- Skill wait approval 等待改为记录 `actor_run_suspended(waitingKind=skill_approval)`。
+- ToolCall approval 等待改为记录 `actor_run_suspended(waitingKind=tool_approval)`。
+- 三类 continue 路径都会记录 `actor_run_resumed`。
+- 更新 human input 与 wait approval demo，验证 suspend / resume 生命周期。
+- 新增 `demo:waiting:resume`，覆盖三类等待边界共 15 条验收。
+- CI 增加 General Waiting Resume Demo。
+- README 与 package 元数据对齐到 v0.4.0。
 
 ---
 
@@ -76,21 +105,6 @@ Possible scope / 可能范围：
 - Added `demo:wait:approval` with 10 checks.
 - Added Wait Approval Runtime Demo to CI.
 - Updated README and package metadata to v0.3.9.
-
-中文：
-
-- `WaitApprovalStep` 扩展为可选 `approvalRequestId`、必填 `reason`、必填 `outputKey`。
-- 新增带 `approvalKind: "skill_step"` 的 `SkillApprovalRequest`。
-- 新增 Wait Approval Runtime helper，用于创建审批请求与写入审批决策。
-- ActorRuntime 执行到 `wait_approval` 时会以 `waiting_approval` 暂停，并在 `continue(approval_decision)` 后恢复。
-- Skill-step 审批决策会写入 `state.steps[stepKey]` 与 `state.outputs[outputKey]`。
-- 复用 `approval_requested` 与 `approval_decided` Trace 事件，并带上 `approvalKind: "skill_step"`。
-- 保留现有 ToolCall approval 行为，并在 pending output 中标记 `approvalKind: "tool_call"`。
-- 新增 `demo:wait:approval`，包含 10 条验收。
-- CI 增加 Wait Approval Runtime Demo。
-- README 与 package 元数据对齐到 v0.3.9。
-
----
 
 ## v0.3.8 — Human Input Runtime Semantics
 

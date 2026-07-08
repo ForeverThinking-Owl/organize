@@ -55,3 +55,6 @@ jobs:
 
       - name: Wait Approval Runtime Demo
         run: npm run demo:wait:approval
+
+      - name: General Waiting Resume Demo
+        run: npm run demo:waiting:resume
