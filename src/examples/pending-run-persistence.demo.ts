@@ -238,7 +238,7 @@ function scenarioChecks(result: ScenarioResult, expectedKind: "human_input" | "s
       detail: "status=" + result.completed.status,
     },
     {
-      label: `${result.label}: Trace 记录 resumed + completed end",
+      label: `${result.label}: Trace 记录 resumed + completed end`,
       pass: hasEvent(result.completed, "actor_run_resumed") && hasCompletedEnd(result.completed),
       detail: `hasResumed=${hasEvent(result.completed, "actor_run_resumed")}, hasCompletedEnd=${hasCompletedEnd(result.completed)}`,
     },
