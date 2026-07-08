@@ -1,6 +1,6 @@
 // ============================================================================
 // TraceLogger — 内存 Trace 记录器
-// v0.4.0: explicit suspend / resume lifecycle for waiting runs
+// v0.4.4: explicit suspend / resume lifecycle supports external events
 // ============================================================================
 
 import { TraceEvent, TraceEventType, ActorRunTrace } from "../core/types/trace";
@@ -25,7 +25,7 @@ function maxCounterFromEventIds(traces: ActorRunTrace[]): number {
 }
 
 export type RunTerminalStatus = "completed" | "error";
-export type RunWaitingStatus = "waiting_approval" | "waiting_human_input";
+export type RunWaitingStatus = "waiting_approval" | "waiting_human_input" | "waiting_external_event";
 
 export class TraceLogger {
   private traces: Map<string, ActorRunTrace> = new Map();
