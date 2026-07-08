@@ -8,13 +8,14 @@ README is the project entry point. Version history, verification coverage, and r
 
 ## Current State / 当前状态
 
-Current version: `v0.4.1 — Persistent Pending Runs`
+Current version: `v0.4.2 — Runtime Recovery Bundle`
 
-当前版本：`v0.4.1 — Persistent Pending Runs`
+当前版本：`v0.4.2 — Runtime Recovery Bundle`
 
 | Boundary / 边界 | Status / 状态 |
 |---|---|
-| Actor Kernel | Single-Actor loop supports ToolCall, tool approval, Skill wait_approval, human input, continue, Trace lifecycle, memory crystallization, store-backed runs, persistent Trace snapshots, and persistent pending runs. / 单 Actor 闭环已支持 ToolCall、工具审批、Skill wait_approval、human input、continue、Trace 生命周期、记忆沉淀、Store-backed run、Trace 快照持久化与 pending run 持久化。 |
+| Actor Kernel | Single-Actor loop supports ToolCall, tool approval, Skill wait_approval, human input, continue, Trace lifecycle, memory crystallization, store-backed runs, persistent Trace snapshots, persistent pending runs, and coordinated recovery bundles. / 单 Actor 闭环已支持 ToolCall、工具审批、Skill wait_approval、human input、continue、Trace 生命周期、记忆沉淀、Store-backed run、Trace 快照持久化、pending run 持久化与组合恢复包。 |
+| Runtime Recovery | `RuntimeRecoveryBundle` coordinates PendingRunSnapshot, TraceSnapshot, and MemorySnapshot without collapsing their boundaries. / `RuntimeRecoveryBundle` 协调 PendingRunSnapshot、TraceSnapshot、MemorySnapshot，同时保持三者边界独立。 |
 | Waiting / Resume | Human input, Skill approval, and ToolCall approval share explicit suspend / resume lifecycle Trace events. / human input、Skill approval、ToolCall approval 已统一使用显式 suspend / resume 生命周期 Trace。 |
 | Pending Runs | Suspended runs can be dumped, saved, restored, and resumed through `continue()`. / suspended run 可导出、保存、恢复，并通过 `continue()` 继续执行。 |
 | Skill Runtime | Strict step parsing, first-class transform execution, human_input waiting, wait_approval waiting, return output mapping, and explicit unsupported-step errors are available. / 已支持严格 step 解析、transform 一等执行、human_input 等待、wait_approval 等待、return output mapping、未支持步骤显式报错。 |
@@ -39,28 +40,59 @@ Current version: `v0.4.1 — Persistent Pending Runs`
 | `npm run demo:wait:approval` | Wait Approval Runtime demo, 10 checks / Wait Approval Runtime Demo，10 条验收 |
 | `npm run demo:waiting:resume` | General Waiting / Resume demo, 15 checks / 通用等待恢复 Demo，15 条验收 |
 | `npm run demo:pending:run` | Pending Run Persistence demo, 18 checks / Pending Run 持久化 Demo，18 条验收 |
+| `npm run demo:recovery:bundle` | Runtime Recovery Bundle demo, 21 checks / Runtime Recovery Bundle Demo，21 条验收 |
 
 ---
 
-## Planned: v0.4.2 — Runtime Recovery Bundle
+## Planned: v0.4.3 — Cross-process Recovery Demo
 
-Goal: define a coordinated recovery package that combines pending runtime state, trace state, and memory state without collapsing their boundaries.
+Goal: demonstrate a more realistic process-boundary recovery flow using the runtime recovery bundle boundary.
 
-目标：定义一个组合恢复包，让 pending runtime state、trace state、memory state 可以协同恢复，同时不混淆三者边界。
+目标：基于 Runtime Recovery Bundle，验证更接近真实进程边界的恢复流程。
 
 Possible scope / 可能范围：
 
-- Add a recovery bundle schema that references or contains PendingRunSnapshot, TraceSnapshot, and MemorySnapshot.
-- Add a demo that restores pending runtime state plus trace and memory state together.
-- Keep stores separable and replaceable.
+- Split recovery demo into a save phase and restore phase.
+- Verify a bundle created by one process-like phase can be restored by another process-like phase.
+- Keep tool registration explicitly application-owned.
 - Keep all existing demos green.
 
 中文可能范围：
 
-- 新增 recovery bundle schema，引用或包含 PendingRunSnapshot、TraceSnapshot、MemorySnapshot。
-- 新增 demo，联合恢复 pending runtime state、trace state 与 memory state。
-- 保持各类 Store 独立可替换。
+- 将恢复 demo 拆成保存阶段与恢复阶段。
+- 验证一个 process-like 阶段创建的 bundle 能被另一个 process-like 阶段恢复。
+- 保持工具注册由应用启动显式负责。
 - 保持现有 demos 全部通过。
+
+---
+
+## v0.4.2 — Runtime Recovery Bundle
+
+- Added `RuntimeRecoveryBundle` schema: `runtime_recovery.bundle.v1`.
+- Added `RuntimeRecoveryStore` interface: `load()`, `save()`, `delete()`, `list()`, `clear()`.
+- Implemented `JsonRuntimeRecoveryStore` with JSON store snapshot validation.
+- Added runtime recovery persistence helpers.
+- Added `createRuntimeRecoveryBundle(actorRunId)` and `restoreRuntimeRecoveryBundle(bundle)`.
+- Recovery bundles combine `PendingRunSnapshot`, `TraceSnapshot`, and `MemorySnapshot` without collapsing their boundaries.
+- Restore order is MemorySnapshot → TraceSnapshot → PendingRunSnapshot.
+- Covered human_input, Skill wait_approval, and ToolCall approval bundle restore flows.
+- Added `demo:recovery:bundle` with 21 checks.
+- Added Runtime Recovery Bundle Demo to CI.
+- Updated README and package metadata to v0.4.2.
+
+中文：
+
+- 新增 `RuntimeRecoveryBundle` schema：`runtime_recovery.bundle.v1`。
+- 新增 `RuntimeRecoveryStore` 接口：`load()`、`save()`、`delete()`、`list()`、`clear()`。
+- 实现带 JSON store snapshot 校验的 `JsonRuntimeRecoveryStore`。
+- 新增 runtime recovery persistence helper。
+- 新增 `createRuntimeRecoveryBundle(actorRunId)` 与 `restoreRuntimeRecoveryBundle(bundle)`。
+- Recovery bundle 组合 `PendingRunSnapshot`、`TraceSnapshot`、`MemorySnapshot`，但不混淆三者边界。
+- 恢复顺序为 MemorySnapshot → TraceSnapshot → PendingRunSnapshot。
+- 覆盖 human_input、Skill wait_approval、ToolCall approval 三类 bundle restore 流程。
+- 新增 `demo:recovery:bundle`，包含 21 条验收。
+- CI 增加 Runtime Recovery Bundle Demo。
+- README 与 package 元数据对齐到 v0.4.2。
 
 ---
 
@@ -77,22 +109,6 @@ Possible scope / 可能范围：
 - Added `demo:pending:run` with 18 checks.
 - Added Pending Run Persistence Demo to CI.
 - Updated README and package metadata to v0.4.1.
-
-中文：
-
-- 新增 `PendingRunSnapshot` schema：`pending_run.snapshot.v1`。
-- 新增 `PendingRunStore` 接口：`load()`、`save()`、`delete()`、`list()`、`clear()`。
-- 实现带 JSON store snapshot 校验的 `JsonPendingRunStore`。
-- 新增 pending run persistence helper。
-- 新增 `ActorRuntime.dumpPendingRun()`、`restorePendingRun()`、`clearRun()`。
-- 新增 `ApprovalGate.restorePending()` 与 `clearPending()`，确保 ToolCall approval 可恢复。
-- Pending snapshot 与 TraceSnapshot、MemorySnapshot 保持边界分离。
-- 覆盖 human_input、Skill wait_approval、ToolCall approval 三类 pending restore 流程。
-- 新增 `demo:pending:run`，包含 18 条验收。
-- CI 增加 Pending Run Persistence Demo。
-- README 与 package 元数据对齐到 v0.4.1。
-
----
 
 ## v0.4.0 — General Waiting / Resume Model
 
