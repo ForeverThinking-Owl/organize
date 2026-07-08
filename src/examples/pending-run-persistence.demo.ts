@@ -109,6 +109,8 @@ interface ScenarioResult {
   completed: ActorRunOutput;
   listCountAfterSave: number;
   listCountAfterDelete: number;
+  hasResumed: boolean;
+  hasCompletedEnd: boolean;
 }
 
 function registerTools(): void {
@@ -164,6 +166,13 @@ async function persistClearRestore(store: JsonPendingRunStore, waiting: ActorRun
   return { snapshot, loaded, listCountAfterSave, listCountAfterDelete };
 }
 
+function traceSummary(completed: ActorRunOutput): { hasResumed: boolean; hasCompletedEnd: boolean } {
+  return {
+    hasResumed: hasEvent(completed, "actor_run_resumed"),
+    hasCompletedEnd: hasCompletedEnd(completed),
+  };
+}
+
 async function runHumanInputScenario(store: JsonPendingRunStore): Promise<ScenarioResult> {
   resetRuntime();
   const waiting = await actorRuntime.run(runArgs(HUMAN_INPUT_SKILL, "客户需要人工补充意见。"));
@@ -178,7 +187,7 @@ async function runHumanInputScenario(store: JsonPendingRunStore): Promise<Scenar
       respondedAt: new Date().toISOString(),
     },
   });
-  return { label: "human_input", waiting, completed, ...persisted };
+  return { label: "human_input", waiting, completed, ...persisted, ...traceSummary(completed) };
 }
 
 async function runSkillApprovalScenario(store: JsonPendingRunStore): Promise<ScenarioResult> {
@@ -196,7 +205,7 @@ async function runSkillApprovalScenario(store: JsonPendingRunStore): Promise<Sce
       decidedAt: new Date().toISOString(),
     },
   });
-  return { label: "skill_approval", waiting, completed, ...persisted };
+  return { label: "skill_approval", waiting, completed, ...persisted, ...traceSummary(completed) };
 }
 
 async function runToolApprovalScenario(store: JsonPendingRunStore): Promise<ScenarioResult> {
@@ -214,7 +223,7 @@ async function runToolApprovalScenario(store: JsonPendingRunStore): Promise<Scen
       decidedAt: new Date().toISOString(),
     },
   });
-  return { label: "tool_approval", waiting, completed, ...persisted };
+  return { label: "tool_approval", waiting, completed, ...persisted, ...traceSummary(completed) };
 }
 
 function scenarioChecks(result: ScenarioResult, expectedKind: "human_input" | "skill_approval" | "tool_approval"): CheckResult[] {
@@ -239,8 +248,8 @@ function scenarioChecks(result: ScenarioResult, expectedKind: "human_input" | "s
     },
     {
       label: `${result.label}: Trace 记录 resumed + completed end`,
-      pass: hasEvent(result.completed, "actor_run_resumed") && hasCompletedEnd(result.completed),
-      detail: `hasResumed=${hasEvent(result.completed, "actor_run_resumed")}, hasCompletedEnd=${hasCompletedEnd(result.completed)}`,
+      pass: result.hasResumed && result.hasCompletedEnd,
+      detail: `hasResumed=${result.hasResumed}, hasCompletedEnd=${result.hasCompletedEnd}`,
     },
   ];
 }
