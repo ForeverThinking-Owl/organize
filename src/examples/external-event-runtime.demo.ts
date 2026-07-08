@@ -89,6 +89,12 @@ interface ScenarioResult {
   loaded?: boolean;
   memoryCountAfterRestore?: number;
   traceEventCountAfterRestore?: number;
+  requestedData?: Record<string, unknown> | null;
+  suspendedData?: Record<string, unknown> | null;
+  receivedData?: Record<string, unknown> | null;
+  resumedData?: Record<string, unknown> | null;
+  hasResumed?: boolean;
+  hasCompletedEnd?: boolean;
 }
 
 function registerTools(): void {
@@ -127,6 +133,17 @@ function hasCompletedEnd(output: ActorRunOutput): boolean {
   return traceEvents(output).some((event) => event.eventType === "actor_run_end" && event.data.status === "completed");
 }
 
+function traceSummary(waiting: ActorRunOutput, completed: ActorRunOutput) {
+  return {
+    requestedData: findEvent(waiting, "external_event_requested")?.data ?? null,
+    suspendedData: findEvent(waiting, "actor_run_suspended")?.data ?? null,
+    receivedData: findEvent(completed, "external_event_received")?.data ?? null,
+    resumedData: findEvent(completed, "actor_run_resumed")?.data ?? null,
+    hasResumed: hasEvent(completed, "actor_run_resumed"),
+    hasCompletedEnd: hasCompletedEnd(completed),
+  };
+}
+
 function runInput() {
   return {
     actorConfig: ACTOR_CONFIG,
@@ -161,7 +178,7 @@ async function runDirectScenario(): Promise<ScenarioResult> {
   resetRuntime();
   const waiting = await actorRuntime.run(runInput());
   const completed = await continueWithPaymentEvent(waiting);
-  return { waiting, completed };
+  return { waiting, completed, ...traceSummary(waiting, completed) };
 }
 
 async function runPendingScenario(storePath: string): Promise<ScenarioResult> {
@@ -174,7 +191,7 @@ async function runPendingScenario(storePath: string): Promise<ScenarioResult> {
   const loaded = await store.load(waiting.actorRunId);
   if (loaded) actorRuntime.restorePendingRun(loaded);
   const completed = await continueWithPaymentEvent(waiting);
-  return { waiting, completed, snapshot, storeSaved: Boolean(snapshot), loaded: Boolean(loaded) };
+  return { waiting, completed, snapshot, storeSaved: Boolean(snapshot), loaded: Boolean(loaded), ...traceSummary(waiting, completed) };
 }
 
 async function runBundleScenario(storePath: string): Promise<ScenarioResult> {
@@ -189,14 +206,10 @@ async function runBundleScenario(storePath: string): Promise<ScenarioResult> {
   const memoryCountAfterRestore = memoryService.getStats().memoryCount;
   const traceEventCountAfterRestore = traceLogger.getTrace(waiting.actorRunId)?.events.length ?? 0;
   const completed = await continueWithPaymentEvent(waiting);
-  return { waiting, completed, bundle, storeSaved: Boolean(bundle), loaded: Boolean(loaded), memoryCountAfterRestore, traceEventCountAfterRestore };
+  return { waiting, completed, bundle, storeSaved: Boolean(bundle), loaded: Boolean(loaded), memoryCountAfterRestore, traceEventCountAfterRestore, ...traceSummary(waiting, completed) };
 }
 
 function directChecks(result: ScenarioResult): CheckResult[] {
-  const requested = findEvent(result.waiting, "external_event_requested");
-  const suspended = findEvent(result.waiting, "actor_run_suspended");
-  const received = findEvent(result.completed, "external_event_received");
-  const resumed = findEvent(result.completed, "actor_run_resumed");
   const output = result.completed.result ?? {};
   return [
     {
@@ -214,13 +227,13 @@ function directChecks(result: ScenarioResult): CheckResult[] {
     },
     {
       label: "Trace 记录 external_event_requested",
-      pass: requested?.data.externalEventRequestId === result.waiting.pendingExternalEvent?.externalEventRequestId,
-      detail: JSON.stringify(requested?.data ?? null),
+      pass: result.requestedData?.externalEventRequestId === result.waiting.pendingExternalEvent?.externalEventRequestId,
+      detail: JSON.stringify(result.requestedData ?? null),
     },
     {
       label: "Trace 记录 actor_run_suspended(waitingKind=external_event)",
-      pass: suspended?.data.waitingKind === "external_event" && suspended.data.status === "waiting_external_event",
-      detail: JSON.stringify(suspended?.data ?? null),
+      pass: result.suspendedData?.waitingKind === "external_event" && result.suspendedData.status === "waiting_external_event",
+      detail: JSON.stringify(result.suspendedData ?? null),
     },
     {
       label: "continue(external_event_received) 后 completed",
@@ -229,13 +242,13 @@ function directChecks(result: ScenarioResult): CheckResult[] {
     },
     {
       label: "Trace 记录 actor_run_resumed(waitingKind=external_event)",
-      pass: resumed?.data.waitingKind === "external_event" && resumed.data.resumedBy === "external_event_received",
-      detail: JSON.stringify(resumed?.data ?? null),
+      pass: result.resumedData?.waitingKind === "external_event" && result.resumedData.resumedBy === "external_event_received",
+      detail: JSON.stringify(result.resumedData ?? null),
     },
     {
       label: "Trace 记录 external_event_received 且不记录完整 payload",
-      pass: received?.data.eventName === "payment.confirmed" && !("payload" in (received?.data ?? {})),
-      detail: JSON.stringify(received?.data ?? null),
+      pass: result.receivedData?.eventName === "payment.confirmed" && !("payload" in (result.receivedData ?? {})),
+      detail: JSON.stringify(result.receivedData ?? null),
     },
     {
       label: "transform 能读取 event payload",
@@ -249,8 +262,8 @@ function directChecks(result: ScenarioResult): CheckResult[] {
     },
     {
       label: "最终 Trace 记录 completed actor_run_end",
-      pass: hasCompletedEnd(result.completed),
-      detail: "hasCompletedEnd=" + hasCompletedEnd(result.completed),
+      pass: result.hasCompletedEnd === true,
+      detail: "hasCompletedEnd=" + String(result.hasCompletedEnd),
     },
   ];
 }
@@ -264,8 +277,8 @@ function persistenceChecks(pending: ScenarioResult, bundle: ScenarioResult): Che
     },
     {
       label: "PendingRunStore save/load/restore 后 continue completed",
-      pass: pending.storeSaved === true && pending.loaded === true && pending.completed.status === "completed" && hasEvent(pending.completed, "actor_run_resumed"),
-      detail: `storeSaved=${pending.storeSaved}, loaded=${pending.loaded}, status=${pending.completed.status}`,
+      pass: pending.storeSaved === true && pending.loaded === true && pending.completed.status === "completed" && pending.hasResumed === true,
+      detail: `storeSaved=${pending.storeSaved}, loaded=${pending.loaded}, status=${pending.completed.status}, hasResumed=${pending.hasResumed}`,
     },
     {
       label: "RuntimeRecoveryBundle 支持 external_event",
@@ -279,8 +292,8 @@ function persistenceChecks(pending: ScenarioResult, bundle: ScenarioResult): Che
     },
     {
       label: "RecoveryBundle restore 后 continue completed",
-      pass: bundle.storeSaved === true && bundle.loaded === true && bundle.completed.status === "completed" && hasEvent(bundle.completed, "actor_run_resumed") && hasCompletedEnd(bundle.completed),
-      detail: `storeSaved=${bundle.storeSaved}, loaded=${bundle.loaded}, status=${bundle.completed.status}`,
+      pass: bundle.storeSaved === true && bundle.loaded === true && bundle.completed.status === "completed" && bundle.hasResumed === true && bundle.hasCompletedEnd === true,
+      detail: `storeSaved=${bundle.storeSaved}, loaded=${bundle.loaded}, status=${bundle.completed.status}, hasResumed=${bundle.hasResumed}, hasCompletedEnd=${bundle.hasCompletedEnd}`,
     },
   ];
 }
