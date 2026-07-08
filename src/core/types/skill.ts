@@ -24,6 +24,7 @@ export type SkillStep =
   | ReturnStep
   | HumanInputStep
   | WaitApprovalStep
+  | WaitExternalEventStep
   | EndStep;
 
 export interface SkillStepBase {
@@ -68,6 +69,15 @@ export interface WaitApprovalStep extends SkillStepBase {
   approvalRequestId?: string;
   reason: string;
   outputKey: string;
+}
+
+export interface WaitExternalEventStep extends SkillStepBase {
+  type: "wait_external_event";
+  eventName: string;
+  correlationKey?: string;
+  reason?: string;
+  outputKey: string;
+  eventSchema?: Record<string, unknown>;
 }
 
 export interface EndStep extends SkillStepBase {
