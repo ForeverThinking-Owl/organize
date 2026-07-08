@@ -61,3 +61,6 @@ jobs:
 
       - name: Pending Run Persistence Demo
         run: npm run demo:pending:run
+
+      - name: Runtime Recovery Bundle Demo
+        run: npm run demo:recovery:bundle
