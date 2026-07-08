@@ -1,6 +1,6 @@
 // ============================================================================
-// wait-approval-runtime.demo.ts — v0.3.9
-// 验证 wait_approval Runtime 语义：waiting_approval → continue → completed
+// wait-approval-runtime.demo.ts — v0.4.0
+// 验证 wait_approval Runtime 语义：suspend → resume → completed
 // ============================================================================
 
 import { actorRuntime, ActorRunOutput } from "../runtime/actor-runtime";
@@ -85,6 +85,10 @@ function findEvent(output: ActorRunOutput, eventType: string): TraceEvent | unde
   return traceEvents(output).find((event) => event.eventType === eventType);
 }
 
+function countRunEndEvents(output: ActorRunOutput): number {
+  return traceEvents(output).filter((event) => event.eventType === "actor_run_end").length;
+}
+
 function hasRunEndStatus(output: ActorRunOutput, status: string): boolean {
   return traceEvents(output).some((event) =>
     event.eventType === "actor_run_end" && event.data.status === status
@@ -93,7 +97,7 @@ function hasRunEndStatus(output: ActorRunOutput, status: string): boolean {
 
 async function main() {
   console.log("=".repeat(60));
-  console.log("  ForeverThinking v0.3.9 — Wait Approval Runtime Demo");
+  console.log("  ForeverThinking v0.4.0 — Wait Approval Runtime Demo");
   console.log("=".repeat(60));
   console.log();
 
@@ -108,9 +112,11 @@ async function main() {
   });
 
   const requestedEvent = findEvent(waiting, "approval_requested");
+  const suspendedEvent = findEvent(waiting, "actor_run_suspended");
   console.log("  Status: " + waiting.status);
   console.log("  PendingApproval: " + JSON.stringify(waiting.pendingApproval ?? null));
   console.log("  ApprovalRequested: " + JSON.stringify(requestedEvent?.data ?? null));
+  console.log("  RunSuspended: " + JSON.stringify(suspendedEvent?.data ?? null));
   console.log();
 
   if (!waiting.pendingApproval) {
@@ -119,7 +125,7 @@ async function main() {
 
   const approvalComment = "允许继续生成草稿，但需要避免承诺退款已完成。";
 
-  console.log("✅ 提交 approval_decision，Runtime 应恢复执行后续 transform / return");
+  console.log("✅ 提交 approval_decision，Runtime 应 resume 并执行后续 transform / return");
   const completed = await actorRuntime.continue(waiting.actorRunId, {
     type: "approval_decision",
     decision: {
@@ -132,9 +138,11 @@ async function main() {
   });
 
   const decidedEvent = findEvent(completed, "approval_decided");
+  const resumedEvent = findEvent(completed, "actor_run_resumed");
   const result = completed.result ?? {};
   console.log("  Status: " + completed.status);
   console.log("  Result: " + JSON.stringify(result));
+  console.log("  RunResumed: " + JSON.stringify(resumedEvent?.data ?? null));
   console.log("  ApprovalDecided: " + JSON.stringify(decidedEvent?.data ?? null));
   console.log();
 
@@ -161,14 +169,24 @@ async function main() {
       detail: JSON.stringify(requestedEvent?.data ?? null),
     },
     {
-      label: "waiting_approval 时 Trace 记录 actor_run_end",
-      pass: hasRunEndStatus(waiting, "waiting_approval"),
-      detail: "hasWaitingEnd=" + hasRunEndStatus(waiting, "waiting_approval"),
+      label: "waiting_approval 时 Trace 记录 actor_run_suspended 而不是 actor_run_end",
+      pass:
+        suspendedEvent?.data.status === "waiting_approval" &&
+        suspendedEvent.data.waitingKind === "skill_approval" &&
+        countRunEndEvents(waiting) === 0,
+      detail: "suspended=" + JSON.stringify(suspendedEvent?.data ?? null) + ", runEndCount=" + countRunEndEvents(waiting),
     },
     {
       label: "continue(approval_decision) 后恢复并 completed",
       pass: completed.status === "completed",
       detail: "status=" + completed.status,
+    },
+    {
+      label: "Trace 记录 actor_run_resumed",
+      pass:
+        resumedEvent?.data.waitingKind === "skill_approval" &&
+        resumedEvent.data.resumedBy === "approval_decision",
+      detail: JSON.stringify(resumedEvent?.data ?? null),
     },
     {
       label: "Trace 记录 approval_decided 且来源为 skill_step",
@@ -179,14 +197,12 @@ async function main() {
       detail: JSON.stringify(decidedEvent?.data ?? null),
     },
     {
-      label: "approval decision 写入 state.outputs 并被 transform 读取",
-      pass: result.approval_decision_from_output === "approve_with_comment" && result.approval_comment_from_output === approvalComment,
+      label: "approval decision 写入 outputs / steps 并被 transform 读取",
+      pass:
+        result.approval_decision_from_output === "approve_with_comment" &&
+        result.approval_comment_from_output === approvalComment &&
+        result.approval_decision_from_step === "approve_with_comment",
       detail: "decision=" + String(result.approval_decision_from_output) + ", comment=" + String(result.approval_comment_from_output),
-    },
-    {
-      label: "approval decision 写入 state.steps 并被 transform 读取",
-      pass: result.approval_decision_from_step === "approve_with_comment",
-      detail: "approval_decision_from_step=" + String(result.approval_decision_from_step),
     },
     {
       label: "return output_mapping 输出 approval decision",
@@ -194,9 +210,9 @@ async function main() {
       detail: "draft=" + String(result.draft) + ", source=" + String(result.source),
     },
     {
-      label: "最终 Trace 记录 completed actor_run_end",
-      pass: hasRunEndStatus(completed, "completed"),
-      detail: "hasCompletedEnd=" + hasRunEndStatus(completed, "completed"),
+      label: "最终 Trace 只记录 completed actor_run_end",
+      pass: hasRunEndStatus(completed, "completed") && countRunEndEvents(completed) === 1,
+      detail: "hasCompletedEnd=" + hasRunEndStatus(completed, "completed") + ", runEndCount=" + countRunEndEvents(completed),
     },
   ];
 
