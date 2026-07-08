@@ -1,6 +1,6 @@
 // ============================================================================
 // ActorRuntime — Actor Kernel 主执行器
-// v0.3.9: wait_approval 支持一等 Skill waiting / continue 语义
+// v0.4.0: waiting runs use explicit suspend / resume lifecycle
 // ============================================================================
 
 import { ActorConfig } from "../core/types/actor";
@@ -323,6 +323,12 @@ export class ActorRuntime {
           return this.buildOutput(actorRunId, "error", null);
         }
 
+        traceLogger.resumeRun(actorRunId, {
+          resumedBy: "approval_decision",
+          waitingKind: "skill_approval",
+          requestId: pending.approvalRequestId,
+          stepKey: pending.stepKey,
+        });
         applySkillApprovalDecision(pending, event.decision, state, actorRunId);
         saved.pendingSkillApproval = undefined;
 
@@ -340,6 +346,11 @@ export class ActorRuntime {
         return await this.executeLoop(actorRunId, actorId, context, state, skill, memoryStore);
       }
 
+      traceLogger.resumeRun(actorRunId, {
+        resumedBy: "approval_decision",
+        waitingKind: "tool_approval",
+        requestId: event.decision.approvalRequestId,
+      });
       const execResult = await actorDecisionExecutor.continueAfterApproval(actorRunId, event.decision);
       if (execResult.outcome === "error") {
         state.status = "error";
@@ -367,6 +378,12 @@ export class ActorRuntime {
         return this.buildOutput(actorRunId, "error", null);
       }
 
+      traceLogger.resumeRun(actorRunId, {
+        resumedBy: "human_input_response",
+        waitingKind: "human_input",
+        requestId: pending.humanInputRequestId,
+        stepKey: pending.stepKey,
+      });
       applyHumanInputResponse(pending, event.response, state, actorRunId);
       saved.pendingHumanInput = undefined;
       state.status = "running";
@@ -404,7 +421,11 @@ export class ActorRuntime {
         const saved = this.runs.get(actorRunId);
         if (saved) saved.pendingHumanInput = request;
         state.status = "waiting_human_input";
-        traceLogger.endRun(actorRunId, "waiting_human_input");
+        traceLogger.suspendRun(actorRunId, "waiting_human_input", {
+          waitingKind: "human_input",
+          stepKey: request.stepKey,
+          requestId: request.humanInputRequestId,
+        });
         return this.buildOutput(actorRunId, "waiting_human_input", null, undefined, undefined, request);
       }
 
@@ -413,7 +434,12 @@ export class ActorRuntime {
         const saved = this.runs.get(actorRunId);
         if (saved) saved.pendingSkillApproval = request;
         state.status = "waiting_approval";
-        traceLogger.endRun(actorRunId, "waiting_approval");
+        traceLogger.suspendRun(actorRunId, "waiting_approval", {
+          waitingKind: "skill_approval",
+          stepKey: request.stepKey,
+          requestId: request.approvalRequestId,
+          reason: request.reason,
+        });
         return this.buildOutput(actorRunId, "waiting_approval", null, request);
       }
 
@@ -460,7 +486,12 @@ export class ActorRuntime {
         }
         case "waiting_approval": {
           state.status = "waiting_approval";
-          traceLogger.endRun(actorRunId, "waiting_approval");
+          traceLogger.suspendRun(actorRunId, "waiting_approval", {
+            waitingKind: "tool_approval",
+            requestId: execResult.approvalRequest.approvalRequestId,
+            toolName: execResult.approvalRequest.toolName,
+            reason: execResult.approvalRequest.reason,
+          });
           return this.buildOutput(actorRunId, "waiting_approval", null, execResult.approvalRequest);
         }
         case "final_output": {
@@ -513,9 +544,7 @@ export class ActorRuntime {
       state.status = "error";
     }
 
-    const endStatus: ActorRunStatus = state.status === "waiting_approval" ? "waiting_approval"
-      : state.status === "waiting_human_input" ? "waiting_human_input"
-      : state.status === "completed" ? "completed" : "error";
+    const endStatus: "completed" | "error" = state.status === "completed" ? "completed" : "error";
     traceLogger.endRun(actorRunId, endStatus);
 
     actorDecisionExecutor.removeRun(actorRunId);
