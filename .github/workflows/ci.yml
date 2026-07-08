@@ -67,3 +67,6 @@ jobs:
 
       - name: Cross Process Recovery Demo
         run: npm run demo:recovery:cross-process
+
+      - name: External Event Runtime Demo
+        run: npm run demo:external:event
