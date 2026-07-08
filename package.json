@@ -1,6 +1,6 @@
 {
   "name": "@foreverthinking/organize",
-  "version": "0.3.9",
+  "version": "0.4.0",
   "description": "Self-Operating Organization Actor Kernel",
   "private": true,
   "scripts": {
@@ -15,6 +15,7 @@
     "demo:trace:persistence": "tsx src/examples/trace-persistence.demo.ts",
     "demo:human:input": "tsx src/examples/human-input-runtime.demo.ts",
     "demo:wait:approval": "tsx src/examples/wait-approval-runtime.demo.ts",
+    "demo:waiting:resume": "tsx src/examples/general-waiting-resume.demo.ts",
     "build": "tsc",
     "start:dist": "node dist/examples/customer-after-sales.demo.js",
     "typecheck": "tsc --noEmit"
