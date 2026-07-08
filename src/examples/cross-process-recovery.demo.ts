@@ -1,6 +1,7 @@
 // ============================================================================
-// cross-process-recovery.demo.ts — v0.4.3
+// cross-process-recovery.demo.ts — v0.4.4
 // 验证 RuntimeRecoveryBundle 可以跨 process-like 边界 save / load / restore / continue
+// 覆盖 human_input、Skill approval、ToolCall approval、external_event
 // ============================================================================
 
 import { spawnSync } from "node:child_process";
@@ -8,7 +9,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { actorRuntime, ActorRunOutput } from "../runtime/actor-runtime";
+import { actorRuntime } from "../runtime/actor-runtime";
 import { toolGateway } from "../tools/tool-gateway";
 import {
   queryOrderInfoTool, QueryOrderInfoExecutor,
@@ -27,7 +28,7 @@ import {
 import type { TraceEvent } from "../core/types/trace";
 
 const SUMMARY_PREFIX = "__CROSS_PROCESS_RECOVERY_SUMMARY__";
-const KINDS = ["human_input", "skill_approval", "tool_approval"] as const;
+const KINDS = ["human_input", "skill_approval", "tool_approval", "external_event"] as const;
 type RecoveryKind = typeof KINDS[number];
 type Phase = "save" | "restore";
 
@@ -39,12 +40,12 @@ const BASE_ACTOR_CONFIG = {
   autonomy_level: "L2_read_and_draft",
   memory: [
     "涉及退款时，不要承诺退款完成，只能说提交退款申请或等待财务确认。",
-    "设备连接问题通常需要技术排查。",
+    "外部支付确认事件到达后，才能继续处理支付相关回复。",
   ],
   permissions: {
     allowed_tools: ["query_order_info", "query_ticket_history", "create_ticket"],
     denied_tools: ["create_refund_request", "approve_refund"],
-    allowed_skills: ["cross_process_human", "cross_process_skill_approval", "cross_process_tool_approval"],
+    allowed_skills: ["cross_process_human", "cross_process_skill_approval", "cross_process_tool_approval", "cross_process_external_event"],
   },
   approval_judgment: {
     must_request_approval_when: ["创建 urgent 工单", "外部正式发送客户回复", "涉及退款承诺"],
@@ -110,6 +111,26 @@ const TOOL_APPROVAL_SKILL = {
   ],
 };
 
+const EXTERNAL_EVENT_SKILL = {
+  skill_id: "cross_process_external_event", name: "Cross Process External Event",
+  owner_actor_id: "customer_service_actor",
+  steps: [
+    { step_key: "query_order", type: "tool_call", tool_name: "query_order_info",
+      input_mapping: { order_id: "{{context.order_id}}" }, output_key: "order_info" },
+    { step_key: "wait_payment", type: "wait_external_event",
+      event_name: "payment.confirmed",
+      correlation_key: "{{outputs.order_info.orderId}}",
+      reason: "等待支付系统确认订单支付完成。",
+      output_key: "payment_event" },
+    { step_key: "return", type: "return",
+      output_mapping: {
+        summary: "external event cross-process restored",
+        event_status: "{{outputs.payment_event.payload.status}}",
+        payment_id: "{{outputs.payment_event.payload.payment_id}}",
+      } },
+  ],
+};
+
 interface SaveSummary {
   phase: "save";
   kind: RecoveryKind;
@@ -123,6 +144,7 @@ interface SaveSummary {
   traceEventCount: number;
   memoryCount: number;
   hasPendingToolCall: boolean;
+  hasPendingExternalEvent: boolean;
 }
 
 interface RestoreSummary {
@@ -137,6 +159,7 @@ interface RestoreSummary {
   memoryCountAfterRestore: number;
   resultKeys: string[];
   approvalDecision?: string;
+  eventStatus?: string;
   hasCreateTicketResult: boolean;
   observationsCount: number;
 }
@@ -183,11 +206,12 @@ function hasCompletedEnd(actorRunId: string): boolean {
   );
 }
 
-function skillForKind(kind: RecoveryKind): typeof HUMAN_INPUT_SKILL | typeof SKILL_APPROVAL_SKILL | typeof TOOL_APPROVAL_SKILL {
+function skillForKind(kind: RecoveryKind): typeof HUMAN_INPUT_SKILL | typeof SKILL_APPROVAL_SKILL | typeof TOOL_APPROVAL_SKILL | typeof EXTERNAL_EVENT_SKILL {
   switch (kind) {
     case "human_input": return HUMAN_INPUT_SKILL;
     case "skill_approval": return SKILL_APPROVAL_SKILL;
     case "tool_approval": return TOOL_APPROVAL_SKILL;
+    case "external_event": return EXTERNAL_EVENT_SKILL;
   }
 }
 
@@ -196,6 +220,7 @@ function inputTextForKind(kind: RecoveryKind): string {
     case "human_input": return "客户需要人工补充意见。";
     case "skill_approval": return "客户需要人工审批。";
     case "tool_approval": return "客户说扫码枪连不上系统，还要求退款。";
+    case "external_event": return "客户支付后等待支付系统确认。";
   }
 }
 
@@ -234,6 +259,7 @@ async function runSavePhase(kind: RecoveryKind, storePath: string): Promise<void
     traceEventCount: bundle.trace.traces[0]?.events.length ?? 0,
     memoryCount: bundle.memory.memories.length,
     hasPendingToolCall: Boolean(bundle.pendingRun.pendingToolApproval?.pendingExec.pendingToolCall.toolName),
+    hasPendingExternalEvent: Boolean(bundle.pendingRun.pendingExternalEvent?.externalEventRequestId),
   });
 }
 
@@ -280,6 +306,23 @@ function continuePayloadForBundle(bundle: RuntimeRecoveryBundle) {
         },
       };
     }
+    case "external_event": {
+      const pending = bundle.pendingRun.pendingExternalEvent;
+      if (!pending) throw new Error("Bundle missing pendingExternalEvent");
+      return {
+        type: "external_event_received" as const,
+        event: {
+          externalEventRequestId: pending.externalEventRequestId,
+          eventName: pending.eventName,
+          payload: {
+            payment_id: "PAY_10086",
+            status: "confirmed",
+          },
+          receivedBy: "restore_process_webhook",
+          receivedAt: new Date().toISOString(),
+        },
+      };
+    }
   }
 }
 
@@ -308,6 +351,7 @@ async function runRestorePhase(kind: RecoveryKind, storePath: string, actorRunId
     memoryCountAfterRestore,
     resultKeys: Object.keys(result),
     approvalDecision: typeof result.approval_decision === "string" ? result.approval_decision : undefined,
+    eventStatus: typeof result.event_status === "string" ? result.event_status : undefined,
     hasCreateTicketResult: Boolean(result.create_ticket_result),
     observationsCount: typeof result.observations_count === "number" ? result.observations_count : 0,
   });
@@ -336,7 +380,7 @@ function runChildProcess(args: string[]): SaveSummary | RestoreSummary {
 
 async function runParent(): Promise<void> {
   console.log("=".repeat(60));
-  console.log("  ForeverThinking v0.4.3 — Cross-process Recovery Demo");
+  console.log("  ForeverThinking v0.4.4 — Cross-process Recovery Demo");
   console.log("=".repeat(60));
   console.log();
 
@@ -366,102 +410,38 @@ async function runParent(): Promise<void> {
     const skillRestore = restores.get("skill_approval")!;
     const toolSave = saves.get("tool_approval")!;
     const toolRestore = restores.get("tool_approval")!;
+    const externalSave = saves.get("external_event")!;
+    const externalRestore = restores.get("external_event")!;
 
     const checks: CheckResult[] = [
-      {
-        label: "human_input save phase 输出 waiting_human_input",
-        pass: humanSave.status === "waiting_human_input",
-        detail: JSON.stringify(humanSave),
-      },
-      {
-        label: "human_input bundle pendingKind=human_input",
-        pass: humanSave.pendingKind === "human_input",
-        detail: "pendingKind=" + String(humanSave.pendingKind),
-      },
-      {
-        label: "human_input bundle 包含 pendingRun / trace / memory",
-        pass: humanSave.hasPendingRun && humanSave.hasTrace && humanSave.hasMemory,
-        detail: `pending=${humanSave.hasPendingRun}, trace=${humanSave.hasTrace}, memory=${humanSave.hasMemory}`,
-      },
-      {
-        label: "skill_approval save phase 输出 waiting_approval",
-        pass: skillSave.status === "waiting_approval",
-        detail: JSON.stringify(skillSave),
-      },
-      {
-        label: "skill_approval bundle pendingKind=skill_approval",
-        pass: skillSave.pendingKind === "skill_approval",
-        detail: "pendingKind=" + String(skillSave.pendingKind),
-      },
-      {
-        label: "skill_approval bundle 包含 pendingRun / trace / memory",
-        pass: skillSave.hasPendingRun && skillSave.hasTrace && skillSave.hasMemory,
-        detail: `pending=${skillSave.hasPendingRun}, trace=${skillSave.hasTrace}, memory=${skillSave.hasMemory}`,
-      },
-      {
-        label: "tool_approval save phase 输出 waiting_approval",
-        pass: toolSave.status === "waiting_approval",
-        detail: JSON.stringify(toolSave),
-      },
-      {
-        label: "tool_approval bundle pendingKind=tool_approval",
-        pass: toolSave.pendingKind === "tool_approval",
-        detail: "pendingKind=" + String(toolSave.pendingKind),
-      },
-      {
-        label: "tool_approval bundle 包含 pendingToolCall",
-        pass: toolSave.hasPendingToolCall,
-        detail: "hasPendingToolCall=" + String(toolSave.hasPendingToolCall),
-      },
-      {
-        label: "human_input restore phase completed",
-        pass: humanRestore.completed && humanRestore.status === "completed",
-        detail: JSON.stringify(humanRestore),
-      },
-      {
-        label: "human_input restore Trace 包含 actor_run_resumed",
-        pass: humanRestore.hasResumed,
-        detail: "hasResumed=" + String(humanRestore.hasResumed),
-      },
-      {
-        label: "human_input restore Trace 包含 completed actor_run_end",
-        pass: humanRestore.hasCompletedEnd,
-        detail: "hasCompletedEnd=" + String(humanRestore.hasCompletedEnd),
-      },
-      {
-        label: "skill_approval restore phase completed",
-        pass: skillRestore.completed && skillRestore.status === "completed",
-        detail: JSON.stringify(skillRestore),
-      },
-      {
-        label: "skill_approval approval decision 出现在 result",
-        pass: skillRestore.approvalDecision === "approve_with_comment",
-        detail: "approvalDecision=" + String(skillRestore.approvalDecision),
-      },
-      {
-        label: "skill_approval restore Trace completed",
-        pass: skillRestore.hasCompletedEnd,
-        detail: "hasCompletedEnd=" + String(skillRestore.hasCompletedEnd),
-      },
-      {
-        label: "tool_approval restore phase completed",
-        pass: toolRestore.completed && toolRestore.status === "completed",
-        detail: JSON.stringify(toolRestore),
-      },
-      {
-        label: "tool_approval pending ToolCall 被真实执行",
-        pass: toolRestore.hasCreateTicketResult && toolRestore.observationsCount > 0,
-        detail: `hasCreateTicketResult=${toolRestore.hasCreateTicketResult}, observations=${toolRestore.observationsCount}`,
-      },
-      {
-        label: "tool_approval Trace completed 且 memory stats 非空",
-        pass: toolRestore.hasCompletedEnd && toolRestore.memoryCountAfterRestore > 0,
-        detail: `hasCompletedEnd=${toolRestore.hasCompletedEnd}, memoryCount=${toolRestore.memoryCountAfterRestore}`,
-      },
+      { label: "human_input save phase 输出 waiting_human_input", pass: humanSave.status === "waiting_human_input", detail: JSON.stringify(humanSave) },
+      { label: "human_input bundle pendingKind=human_input", pass: humanSave.pendingKind === "human_input", detail: "pendingKind=" + String(humanSave.pendingKind) },
+      { label: "human_input bundle 包含 pendingRun / trace / memory", pass: humanSave.hasPendingRun && humanSave.hasTrace && humanSave.hasMemory, detail: `pending=${humanSave.hasPendingRun}, trace=${humanSave.hasTrace}, memory=${humanSave.hasMemory}` },
+      { label: "skill_approval save phase 输出 waiting_approval", pass: skillSave.status === "waiting_approval", detail: JSON.stringify(skillSave) },
+      { label: "skill_approval bundle pendingKind=skill_approval", pass: skillSave.pendingKind === "skill_approval", detail: "pendingKind=" + String(skillSave.pendingKind) },
+      { label: "skill_approval bundle 包含 pendingRun / trace / memory", pass: skillSave.hasPendingRun && skillSave.hasTrace && skillSave.hasMemory, detail: `pending=${skillSave.hasPendingRun}, trace=${skillSave.hasTrace}, memory=${skillSave.hasMemory}` },
+      { label: "tool_approval save phase 输出 waiting_approval", pass: toolSave.status === "waiting_approval", detail: JSON.stringify(toolSave) },
+      { label: "tool_approval bundle pendingKind=tool_approval", pass: toolSave.pendingKind === "tool_approval", detail: "pendingKind=" + String(toolSave.pendingKind) },
+      { label: "tool_approval bundle 包含 pendingToolCall", pass: toolSave.hasPendingToolCall, detail: "hasPendingToolCall=" + String(toolSave.hasPendingToolCall) },
+      { label: "external_event save phase 输出 waiting_external_event", pass: externalSave.status === "waiting_external_event", detail: JSON.stringify(externalSave) },
+      { label: "external_event bundle pendingKind=external_event", pass: externalSave.pendingKind === "external_event", detail: "pendingKind=" + String(externalSave.pendingKind) },
+      { label: "external_event bundle 包含 pendingExternalEvent", pass: externalSave.hasPendingExternalEvent, detail: "hasPendingExternalEvent=" + String(externalSave.hasPendingExternalEvent) },
+      { label: "human_input restore phase completed", pass: humanRestore.completed && humanRestore.status === "completed", detail: JSON.stringify(humanRestore) },
+      { label: "human_input restore Trace 包含 actor_run_resumed", pass: humanRestore.hasResumed, detail: "hasResumed=" + String(humanRestore.hasResumed) },
+      { label: "human_input restore Trace 包含 completed actor_run_end", pass: humanRestore.hasCompletedEnd, detail: "hasCompletedEnd=" + String(humanRestore.hasCompletedEnd) },
+      { label: "skill_approval restore phase completed", pass: skillRestore.completed && skillRestore.status === "completed", detail: JSON.stringify(skillRestore) },
+      { label: "skill_approval approval decision 出现在 result", pass: skillRestore.approvalDecision === "approve_with_comment", detail: "approvalDecision=" + String(skillRestore.approvalDecision) },
+      { label: "skill_approval restore Trace completed", pass: skillRestore.hasCompletedEnd, detail: "hasCompletedEnd=" + String(skillRestore.hasCompletedEnd) },
+      { label: "tool_approval restore phase completed", pass: toolRestore.completed && toolRestore.status === "completed", detail: JSON.stringify(toolRestore) },
+      { label: "tool_approval pending ToolCall 被真实执行", pass: toolRestore.hasCreateTicketResult && toolRestore.observationsCount > 0, detail: `hasCreateTicketResult=${toolRestore.hasCreateTicketResult}, observations=${toolRestore.observationsCount}` },
+      { label: "tool_approval Trace completed 且 memory stats 非空", pass: toolRestore.hasCompletedEnd && toolRestore.memoryCountAfterRestore > 0, detail: `hasCompletedEnd=${toolRestore.hasCompletedEnd}, memoryCount=${toolRestore.memoryCountAfterRestore}` },
+      { label: "external_event restore phase completed", pass: externalRestore.completed && externalRestore.status === "completed", detail: JSON.stringify(externalRestore) },
+      { label: "external_event payload 出现在 result", pass: externalRestore.eventStatus === "confirmed", detail: "eventStatus=" + String(externalRestore.eventStatus) },
+      { label: "external_event Trace completed 且 memory stats 非空", pass: externalRestore.hasCompletedEnd && externalRestore.memoryCountAfterRestore > 0, detail: `hasCompletedEnd=${externalRestore.hasCompletedEnd}, memoryCount=${externalRestore.memoryCountAfterRestore}` },
     ];
 
     console.log("=".repeat(60));
-    console.log("  ✅ Cross-process Recovery 验收检查 (18 条)");
+    console.log("  ✅ Cross-process Recovery 验收检查 (24 条)");
     console.log("=".repeat(60));
 
     let passCount = 0;
@@ -474,9 +454,7 @@ async function runParent(): Promise<void> {
 
     console.log("-".repeat(60));
     console.log("  通过: " + passCount + "/" + checks.length);
-    console.log(passCount === checks.length
-      ? "  🎉 Cross-process Recovery 验证通过！"
-      : "  ❌ 部分验收标准未通过");
+    console.log(passCount === checks.length ? "  🎉 Cross-process Recovery 验证通过！" : "  ❌ 部分验收标准未通过");
     console.log("-".repeat(60));
 
     if (passCount !== checks.length) process.exit(1);
