@@ -94,8 +94,13 @@ interface CheckResult { label: string; pass: boolean; detail: string; }
 interface ScenarioResult {
   waiting: ActorRunOutput;
   completed: ActorRunOutput;
+  suspendedData: Record<string, unknown> | null;
+  resumedData: Record<string, unknown> | null;
   waitingRunEndCount: number;
   waitingEndedAt: string | undefined;
+  completedRunEndCount: number;
+  completedEndedAt: string | undefined;
+  completedHasEnd: boolean;
 }
 
 function registerTools(): void {
@@ -143,12 +148,27 @@ function runArgs(skillConfig: typeof HUMAN_INPUT_SKILL | typeof SKILL_APPROVAL_S
   };
 }
 
+function snapshotScenario(waiting: ActorRunOutput, completed: ActorRunOutput): ScenarioResult {
+  return {
+    waiting,
+    completed,
+    suspendedData: findEvent(waiting, "actor_run_suspended")?.data ?? null,
+    resumedData: findEvent(completed, "actor_run_resumed")?.data ?? null,
+    waitingRunEndCount: countRunEndEvents(waiting),
+    waitingEndedAt: endedAt(waiting),
+    completedRunEndCount: countRunEndEvents(completed),
+    completedEndedAt: endedAt(completed),
+    completedHasEnd: hasCompletedEnd(completed),
+  };
+}
+
 async function runHumanInputScenario(): Promise<ScenarioResult> {
   resetRuntime();
   const waiting = await actorRuntime.run(runArgs(HUMAN_INPUT_SKILL, "客户需要人工补充意见。"));
+  if (!waiting.pendingHumanInput) throw new Error("human_input scenario expected pendingHumanInput");
   const waitingRunEndCount = countRunEndEvents(waiting);
   const waitingEndedAt = endedAt(waiting);
-  if (!waiting.pendingHumanInput) throw new Error("human_input scenario expected pendingHumanInput");
+  const suspendedData = findEvent(waiting, "actor_run_suspended")?.data ?? null;
   const completed = await actorRuntime.continue(waiting.actorRunId, {
     type: "human_input_response",
     response: {
@@ -158,15 +178,16 @@ async function runHumanInputScenario(): Promise<ScenarioResult> {
       respondedAt: new Date().toISOString(),
     },
   });
-  return { waiting, completed, waitingRunEndCount, waitingEndedAt };
+  return { ...snapshotScenario(waiting, completed), waitingRunEndCount, waitingEndedAt, suspendedData };
 }
 
 async function runSkillApprovalScenario(): Promise<ScenarioResult> {
   resetRuntime();
   const waiting = await actorRuntime.run(runArgs(SKILL_APPROVAL_SKILL, "客户需要人工审批。"));
+  if (!waiting.pendingApproval) throw new Error("skill approval scenario expected pendingApproval");
   const waitingRunEndCount = countRunEndEvents(waiting);
   const waitingEndedAt = endedAt(waiting);
-  if (!waiting.pendingApproval) throw new Error("skill approval scenario expected pendingApproval");
+  const suspendedData = findEvent(waiting, "actor_run_suspended")?.data ?? null;
   const completed = await actorRuntime.continue(waiting.actorRunId, {
     type: "approval_decision",
     decision: {
@@ -177,15 +198,16 @@ async function runSkillApprovalScenario(): Promise<ScenarioResult> {
       decidedAt: new Date().toISOString(),
     },
   });
-  return { waiting, completed, waitingRunEndCount, waitingEndedAt };
+  return { ...snapshotScenario(waiting, completed), waitingRunEndCount, waitingEndedAt, suspendedData };
 }
 
 async function runToolApprovalScenario(): Promise<ScenarioResult> {
   resetRuntime();
   const waiting = await actorRuntime.run(runArgs(TOOL_APPROVAL_SKILL, "客户说扫码枪连不上系统，还要求退款。"));
+  if (!waiting.pendingApproval) throw new Error("tool approval scenario expected pendingApproval");
   const waitingRunEndCount = countRunEndEvents(waiting);
   const waitingEndedAt = endedAt(waiting);
-  if (!waiting.pendingApproval) throw new Error("tool approval scenario expected pendingApproval");
+  const suspendedData = findEvent(waiting, "actor_run_suspended")?.data ?? null;
   const completed = await actorRuntime.continue(waiting.actorRunId, {
     type: "approval_decision",
     decision: {
@@ -196,33 +218,30 @@ async function runToolApprovalScenario(): Promise<ScenarioResult> {
       decidedAt: new Date().toISOString(),
     },
   });
-  return { waiting, completed, waitingRunEndCount, waitingEndedAt };
+  return { ...snapshotScenario(waiting, completed), waitingRunEndCount, waitingEndedAt, suspendedData };
 }
 
 function lifecycleChecks(label: string, waitingKind: string, scenario: ScenarioResult): CheckResult[] {
-  const { waiting, completed, waitingRunEndCount, waitingEndedAt } = scenario;
-  const suspended = findEvent(waiting, "actor_run_suspended");
-  const resumed = findEvent(completed, "actor_run_resumed");
   return [
     {
       label: `${label}: waiting 阶段记录 actor_run_suspended`,
-      pass: suspended?.data.waitingKind === waitingKind,
-      detail: JSON.stringify(suspended?.data ?? null),
+      pass: scenario.suspendedData?.waitingKind === waitingKind,
+      detail: JSON.stringify(scenario.suspendedData),
     },
     {
       label: `${label}: waiting 阶段不记录 actor_run_end / endedAt`,
-      pass: waitingRunEndCount === 0 && waitingEndedAt === undefined,
-      detail: `waitingRunEndCount=${waitingRunEndCount}, waitingEndedAt=${String(waitingEndedAt)}`,
+      pass: scenario.waitingRunEndCount === 0 && scenario.waitingEndedAt === undefined,
+      detail: `waitingRunEndCount=${scenario.waitingRunEndCount}, waitingEndedAt=${String(scenario.waitingEndedAt)}`,
     },
     {
       label: `${label}: continue 后记录 actor_run_resumed`,
-      pass: resumed?.data.waitingKind === waitingKind,
-      detail: JSON.stringify(resumed?.data ?? null),
+      pass: scenario.resumedData?.waitingKind === waitingKind,
+      detail: JSON.stringify(scenario.resumedData),
     },
     {
       label: `${label}: 最终只记录 completed actor_run_end`,
-      pass: completed.status === "completed" && hasCompletedEnd(completed) && countRunEndEvents(completed) === 1 && typeof endedAt(completed) === "string",
-      detail: `status=${completed.status}, runEndCount=${countRunEndEvents(completed)}, endedAt=${String(endedAt(completed))}`,
+      pass: scenario.completed.status === "completed" && scenario.completedHasEnd && scenario.completedRunEndCount === 1 && typeof scenario.completedEndedAt === "string",
+      detail: `status=${scenario.completed.status}, runEndCount=${scenario.completedRunEndCount}, endedAt=${String(scenario.completedEndedAt)}`,
     },
   ];
 }
