@@ -1,7 +1,7 @@
 // ============================================================================
 // ApprovalGate — 审批网关
 // 判断 ToolCall 是否需要审批，处理审批请求和决策
-// v0.1.4: ApprovalRequest 带 toolName；approval_requested 在创建时记录
+// v0.4.1: allow pending approval restore for persistent pending runs
 // ============================================================================
 
 import {
@@ -13,6 +13,12 @@ import { ToolCallRequest, ToolDefinition } from "../core/types/tool";
 import { traceLogger } from "../trace/trace-logger";
 
 let approvalCounter = 0;
+
+function counterFromApprovalId(approvalRequestId: string): number | null {
+  if (!approvalRequestId.startsWith("appr_")) return null;
+  const n = Number(approvalRequestId.slice("appr_".length));
+  return Number.isInteger(n) ? n : null;
+}
 
 export class ApprovalGate {
   /** 待审批请求（按 actorRunId 索引） */
@@ -101,6 +107,17 @@ export class ApprovalGate {
    */
   getPending(actorRunId: string): ApprovalRequest | undefined {
     return this.pendingApprovals.get(actorRunId);
+  }
+
+  /**
+   * v0.4.1: 从 PendingRunSnapshot 恢复待审批请求。
+   */
+  restorePending(actorRunId: string, approvalRequest: ApprovalRequest): void {
+    this.pendingApprovals.set(actorRunId, approvalRequest);
+    const counter = counterFromApprovalId(approvalRequest.approvalRequestId);
+    if (counter !== null && counter > approvalCounter) {
+      approvalCounter = counter;
+    }
   }
 
   /**
