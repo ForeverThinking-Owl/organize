@@ -113,6 +113,7 @@ async function main() {
 
   const requestedEvent = findEvent(waiting, "approval_requested");
   const suspendedEvent = findEvent(waiting, "actor_run_suspended");
+  const waitingRunEndCount = countRunEndEvents(waiting);
   console.log("  Status: " + waiting.status);
   console.log("  PendingApproval: " + JSON.stringify(waiting.pendingApproval ?? null));
   console.log("  ApprovalRequested: " + JSON.stringify(requestedEvent?.data ?? null));
@@ -173,8 +174,8 @@ async function main() {
       pass:
         suspendedEvent?.data.status === "waiting_approval" &&
         suspendedEvent.data.waitingKind === "skill_approval" &&
-        countRunEndEvents(waiting) === 0,
-      detail: "suspended=" + JSON.stringify(suspendedEvent?.data ?? null) + ", runEndCount=" + countRunEndEvents(waiting),
+        waitingRunEndCount === 0,
+      detail: "suspended=" + JSON.stringify(suspendedEvent?.data ?? null) + ", waitingRunEndCount=" + waitingRunEndCount,
     },
     {
       label: "continue(approval_decision) 后恢复并 completed",
