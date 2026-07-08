@@ -58,3 +58,6 @@ jobs:
 
       - name: General Waiting Resume Demo
         run: npm run demo:waiting:resume
+
+      - name: Pending Run Persistence Demo
+        run: npm run demo:pending:run
