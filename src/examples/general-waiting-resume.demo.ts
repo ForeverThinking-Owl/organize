@@ -58,10 +58,7 @@ const HUMAN_INPUT_SKILL = {
     { step_key: "ask_human", type: "human_input",
       prompt: "请人工补充是否允许继续。", output_key: "human_confirmation" },
     { step_key: "return", type: "return",
-      output_mapping: {
-        summary: "human input completed",
-        human_confirmation: "{{outputs.human_confirmation}}",
-      } },
+      output_mapping: { summary: "human input completed", human_confirmation: "{{outputs.human_confirmation}}" } },
   ],
 };
 
@@ -74,10 +71,7 @@ const SKILL_APPROVAL_SKILL = {
     { step_key: "manual_approval", type: "wait_approval",
       reason: "请人工审批是否允许继续。", output_key: "approval_result" },
     { step_key: "return", type: "return",
-      output_mapping: {
-        summary: "skill approval completed",
-        approval_decision: "{{outputs.approval_result.decision}}",
-      } },
+      output_mapping: { summary: "skill approval completed", approval_decision: "{{outputs.approval_result.decision}}" } },
   ],
 };
 
@@ -97,6 +91,12 @@ const TOOL_APPROVAL_SKILL = {
 };
 
 interface CheckResult { label: string; pass: boolean; detail: string; }
+interface ScenarioResult {
+  waiting: ActorRunOutput;
+  completed: ActorRunOutput;
+  waitingRunEndCount: number;
+  waitingEndedAt: string | undefined;
+}
 
 function registerTools(): void {
   toolGateway.registerDefinition(queryOrderInfoTool);
@@ -143,9 +143,11 @@ function runArgs(skillConfig: typeof HUMAN_INPUT_SKILL | typeof SKILL_APPROVAL_S
   };
 }
 
-async function runHumanInputScenario() {
+async function runHumanInputScenario(): Promise<ScenarioResult> {
   resetRuntime();
   const waiting = await actorRuntime.run(runArgs(HUMAN_INPUT_SKILL, "客户需要人工补充意见。"));
+  const waitingRunEndCount = countRunEndEvents(waiting);
+  const waitingEndedAt = endedAt(waiting);
   if (!waiting.pendingHumanInput) throw new Error("human_input scenario expected pendingHumanInput");
   const completed = await actorRuntime.continue(waiting.actorRunId, {
     type: "human_input_response",
@@ -156,12 +158,14 @@ async function runHumanInputScenario() {
       respondedAt: new Date().toISOString(),
     },
   });
-  return { waiting, completed };
+  return { waiting, completed, waitingRunEndCount, waitingEndedAt };
 }
 
-async function runSkillApprovalScenario() {
+async function runSkillApprovalScenario(): Promise<ScenarioResult> {
   resetRuntime();
   const waiting = await actorRuntime.run(runArgs(SKILL_APPROVAL_SKILL, "客户需要人工审批。"));
+  const waitingRunEndCount = countRunEndEvents(waiting);
+  const waitingEndedAt = endedAt(waiting);
   if (!waiting.pendingApproval) throw new Error("skill approval scenario expected pendingApproval");
   const completed = await actorRuntime.continue(waiting.actorRunId, {
     type: "approval_decision",
@@ -173,12 +177,14 @@ async function runSkillApprovalScenario() {
       decidedAt: new Date().toISOString(),
     },
   });
-  return { waiting, completed };
+  return { waiting, completed, waitingRunEndCount, waitingEndedAt };
 }
 
-async function runToolApprovalScenario() {
+async function runToolApprovalScenario(): Promise<ScenarioResult> {
   resetRuntime();
   const waiting = await actorRuntime.run(runArgs(TOOL_APPROVAL_SKILL, "客户说扫码枪连不上系统，还要求退款。"));
+  const waitingRunEndCount = countRunEndEvents(waiting);
+  const waitingEndedAt = endedAt(waiting);
   if (!waiting.pendingApproval) throw new Error("tool approval scenario expected pendingApproval");
   const completed = await actorRuntime.continue(waiting.actorRunId, {
     type: "approval_decision",
@@ -190,10 +196,11 @@ async function runToolApprovalScenario() {
       decidedAt: new Date().toISOString(),
     },
   });
-  return { waiting, completed };
+  return { waiting, completed, waitingRunEndCount, waitingEndedAt };
 }
 
-function lifecycleChecks(label: string, waitingKind: string, waiting: ActorRunOutput, completed: ActorRunOutput): CheckResult[] {
+function lifecycleChecks(label: string, waitingKind: string, scenario: ScenarioResult): CheckResult[] {
+  const { waiting, completed, waitingRunEndCount, waitingEndedAt } = scenario;
   const suspended = findEvent(waiting, "actor_run_suspended");
   const resumed = findEvent(completed, "actor_run_resumed");
   return [
@@ -203,9 +210,9 @@ function lifecycleChecks(label: string, waitingKind: string, waiting: ActorRunOu
       detail: JSON.stringify(suspended?.data ?? null),
     },
     {
-      label: `${label}: waiting 阶段不记录 actor_run_end`,
-      pass: countRunEndEvents(waiting) === 0 && endedAt(waiting) === undefined,
-      detail: `runEndCount=${countRunEndEvents(waiting)}, endedAt=${String(endedAt(waiting))}`,
+      label: `${label}: waiting 阶段不记录 actor_run_end / endedAt`,
+      pass: waitingRunEndCount === 0 && waitingEndedAt === undefined,
+      detail: `waitingRunEndCount=${waitingRunEndCount}, waitingEndedAt=${String(waitingEndedAt)}`,
     },
     {
       label: `${label}: continue 后记录 actor_run_resumed`,
@@ -250,19 +257,19 @@ async function main() {
       pass: human.waiting.status === "waiting_human_input" && Boolean(human.waiting.pendingHumanInput),
       detail: "status=" + human.waiting.status,
     },
-    ...lifecycleChecks("human_input", "human_input", human.waiting, human.completed),
+    ...lifecycleChecks("human_input", "human_input", human),
     {
       label: "Skill wait_approval 返回 waiting_approval + approvalKind=skill_step",
       pass: skillApproval.waiting.status === "waiting_approval" && skillApproval.waiting.pendingApproval?.approvalKind === "skill_step",
       detail: JSON.stringify(skillApproval.waiting.pendingApproval ?? null),
     },
-    ...lifecycleChecks("skill_approval", "skill_approval", skillApproval.waiting, skillApproval.completed),
+    ...lifecycleChecks("skill_approval", "skill_approval", skillApproval),
     {
       label: "ToolCall approval 返回 waiting_approval + approvalKind=tool_call",
       pass: toolApproval.waiting.status === "waiting_approval" && toolApproval.waiting.pendingApproval?.approvalKind === "tool_call",
       detail: JSON.stringify(toolApproval.waiting.pendingApproval ?? null),
     },
-    ...lifecycleChecks("tool_approval", "tool_approval", toolApproval.waiting, toolApproval.completed),
+    ...lifecycleChecks("tool_approval", "tool_approval", toolApproval),
   ];
 
   console.log("=".repeat(60));
