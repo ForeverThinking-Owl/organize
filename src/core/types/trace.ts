@@ -28,6 +28,8 @@ export type TraceEventType =
   | "approval_decided"
   | "human_input_requested"
   | "human_input_received"
+  | "external_event_requested"
+  | "external_event_received"
   | "llm_call_start"
   | "llm_call_end"
   | "llm_validation_failed"
@@ -60,6 +62,6 @@ export interface ActorRunTrace {
   skillId: string;
   startedAt: string;
   endedAt?: string;
-  status: "running" | "completed" | "waiting_approval" | "waiting_human_input" | "error";
+  status: "running" | "completed" | "waiting_approval" | "waiting_human_input" | "waiting_external_event" | "error";
   events: TraceEvent[];
 }

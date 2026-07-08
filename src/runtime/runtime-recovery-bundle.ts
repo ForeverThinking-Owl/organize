@@ -1,6 +1,6 @@
 // ============================================================================
 // RuntimeRecoveryBundle
-// v0.4.2: coordinated recovery package for pending runtime + trace + memory
+// v0.4.4: coordinated recovery package supports external event waits
 // ============================================================================
 
 import { memoryService } from "../memory/memory-service";
@@ -58,10 +58,10 @@ export function assertRuntimeRecoveryBundle(value: unknown): asserts value is Ru
   if (typeof bundle.skillId !== "string") {
     throw new Error("Invalid RuntimeRecoveryBundle: skillId must be a string");
   }
-  if (bundle.status !== "waiting_human_input" && bundle.status !== "waiting_approval") {
+  if (!["waiting_human_input", "waiting_approval", "waiting_external_event"].includes(String(bundle.status))) {
     throw new Error("Invalid RuntimeRecoveryBundle: unsupported status " + String(bundle.status));
   }
-  if (!["human_input", "skill_approval", "tool_approval"].includes(String(bundle.pendingKind))) {
+  if (!["human_input", "skill_approval", "tool_approval", "external_event"].includes(String(bundle.pendingKind))) {
     throw new Error("Invalid RuntimeRecoveryBundle: unsupported pendingKind " + String(bundle.pendingKind));
   }
   if (bundle.pendingRun === null || typeof bundle.pendingRun !== "object") {
