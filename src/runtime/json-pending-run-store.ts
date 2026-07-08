@@ -1,6 +1,6 @@
 // ============================================================================
 // JsonPendingRunStore
-// v0.4.1: PendingRunStore implementation backed by one local JSON file
+// v0.4.4: PendingRunStore implementation validates external event waits
 // ============================================================================
 
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -46,10 +46,10 @@ export function assertPendingRunSnapshot(value: unknown): asserts value is Pendi
   assertStringField(value, "actorId", "PendingRunSnapshot");
   assertStringField(value, "skillId", "PendingRunSnapshot");
 
-  if (value.status !== "waiting_human_input" && value.status !== "waiting_approval") {
-    throw new Error("Invalid PendingRunSnapshot: status must be waiting_human_input or waiting_approval");
+  if (value.status !== "waiting_human_input" && value.status !== "waiting_approval" && value.status !== "waiting_external_event") {
+    throw new Error("Invalid PendingRunSnapshot: status must be waiting_human_input, waiting_approval, or waiting_external_event");
   }
-  if (!["human_input", "skill_approval", "tool_approval"].includes(String(value.pendingKind))) {
+  if (!["human_input", "skill_approval", "tool_approval", "external_event"].includes(String(value.pendingKind))) {
     throw new Error("Invalid PendingRunSnapshot: unsupported pendingKind " + String(value.pendingKind));
   }
 
@@ -68,6 +68,9 @@ export function assertPendingRunSnapshot(value: unknown): asserts value is Pendi
     const toolApproval = value.pendingToolApproval as Record<string, unknown>;
     assertObjectField(toolApproval, "approvalRequest", "PendingToolApprovalSnapshot");
     assertObjectField(toolApproval, "pendingExec", "PendingToolApprovalSnapshot");
+  }
+  if (value.pendingKind === "external_event") {
+    assertObjectField(value, "pendingExternalEvent", "PendingRunSnapshot");
   }
 }
 
