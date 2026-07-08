@@ -8,6 +8,8 @@
  */
 export type TraceEventType =
   | "actor_run_start"
+  | "actor_run_suspended"
+  | "actor_run_resumed"
   | "actor_run_end"
   | "context_built"
   | "memory_retrieved"
