@@ -1,6 +1,6 @@
 // ============================================================================
-// human-input-runtime.demo.ts — v0.3.8
-// 验证 human_input Runtime 语义：waiting_human_input → continue → completed
+// human-input-runtime.demo.ts — v0.4.0
+// 验证 human_input Runtime 语义：suspend → resume → completed
 // ============================================================================
 
 import { actorRuntime, ActorRunOutput } from "../runtime/actor-runtime";
@@ -83,6 +83,10 @@ function findEvent(output: ActorRunOutput, eventType: string): TraceEvent | unde
   return traceEvents(output).find((event) => event.eventType === eventType);
 }
 
+function countRunEndEvents(output: ActorRunOutput): number {
+  return traceEvents(output).filter((event) => event.eventType === "actor_run_end").length;
+}
+
 function hasRunEndStatus(output: ActorRunOutput, status: string): boolean {
   return traceEvents(output).some((event) =>
     event.eventType === "actor_run_end" && event.data.status === status
@@ -91,7 +95,7 @@ function hasRunEndStatus(output: ActorRunOutput, status: string): boolean {
 
 async function main() {
   console.log("=".repeat(60));
-  console.log("  ForeverThinking v0.3.8 — Human Input Runtime Demo");
+  console.log("  ForeverThinking v0.4.0 — Human Input Runtime Demo");
   console.log("=".repeat(60));
   console.log();
 
@@ -106,9 +110,11 @@ async function main() {
   });
 
   const requestedEvent = findEvent(waiting, "human_input_requested");
+  const suspendedEvent = findEvent(waiting, "actor_run_suspended");
   console.log("  Status: " + waiting.status);
   console.log("  PendingHumanInput: " + JSON.stringify(waiting.pendingHumanInput ?? null));
   console.log("  HumanInputRequested: " + JSON.stringify(requestedEvent?.data ?? null));
+  console.log("  RunSuspended: " + JSON.stringify(suspendedEvent?.data ?? null));
   console.log();
 
   if (!waiting.pendingHumanInput) {
@@ -117,7 +123,7 @@ async function main() {
 
   const humanValue = "允许继续生成草稿，但不要承诺退款已完成。";
 
-  console.log("🙋 提交 human_input_response，Runtime 应恢复执行后续 transform / return");
+  console.log("🙋 提交 human_input_response，Runtime 应 resume 并执行后续 transform / return");
   const completed = await actorRuntime.continue(waiting.actorRunId, {
     type: "human_input_response",
     response: {
@@ -129,9 +135,11 @@ async function main() {
   });
 
   const receivedEvent = findEvent(completed, "human_input_received");
+  const resumedEvent = findEvent(completed, "actor_run_resumed");
   const result = completed.result ?? {};
   console.log("  Status: " + completed.status);
   console.log("  Result: " + JSON.stringify(result));
+  console.log("  RunResumed: " + JSON.stringify(resumedEvent?.data ?? null));
   console.log("  HumanInputReceived: " + JSON.stringify(receivedEvent?.data ?? null));
   console.log();
 
@@ -155,14 +163,24 @@ async function main() {
       detail: JSON.stringify(requestedEvent?.data ?? null),
     },
     {
-      label: "waiting_human_input 时 Trace 记录 actor_run_end",
-      pass: hasRunEndStatus(waiting, "waiting_human_input"),
-      detail: "hasWaitingEnd=" + hasRunEndStatus(waiting, "waiting_human_input"),
+      label: "waiting_human_input 时 Trace 记录 actor_run_suspended 而不是 actor_run_end",
+      pass:
+        suspendedEvent?.data.status === "waiting_human_input" &&
+        suspendedEvent.data.waitingKind === "human_input" &&
+        countRunEndEvents(waiting) === 0,
+      detail: "suspended=" + JSON.stringify(suspendedEvent?.data ?? null) + ", runEndCount=" + countRunEndEvents(waiting),
     },
     {
       label: "continue(human_input_response) 后恢复并 completed",
       pass: completed.status === "completed",
       detail: "status=" + completed.status,
+    },
+    {
+      label: "Trace 记录 actor_run_resumed",
+      pass:
+        resumedEvent?.data.waitingKind === "human_input" &&
+        resumedEvent.data.resumedBy === "human_input_response",
+      detail: JSON.stringify(resumedEvent?.data ?? null),
     },
     {
       label: "Trace 记录 human_input_received 且不记录完整 response value",
@@ -173,14 +191,9 @@ async function main() {
       detail: JSON.stringify(receivedEvent?.data ?? null),
     },
     {
-      label: "human response 写入 state.outputs 并被 transform 读取",
-      pass: result.human_confirmation_from_output === humanValue,
-      detail: "human_confirmation_from_output=" + String(result.human_confirmation_from_output),
-    },
-    {
-      label: "human response 写入 state.steps 并被 transform 读取",
-      pass: result.human_confirmation_from_step === humanValue,
-      detail: "human_confirmation_from_step=" + String(result.human_confirmation_from_step),
+      label: "human response 写入 state.outputs / state.steps 并被 transform 读取",
+      pass: result.human_confirmation_from_output === humanValue && result.human_confirmation_from_step === humanValue,
+      detail: "fromOutput=" + String(result.human_confirmation_from_output) + ", fromStep=" + String(result.human_confirmation_from_step),
     },
     {
       label: "return output_mapping 输出 human input 结果",
@@ -188,9 +201,9 @@ async function main() {
       detail: "draft=" + String(result.draft) + ", source=" + String(result.source),
     },
     {
-      label: "最终 Trace 记录 completed actor_run_end",
-      pass: hasRunEndStatus(completed, "completed"),
-      detail: "hasCompletedEnd=" + hasRunEndStatus(completed, "completed"),
+      label: "最终 Trace 只记录 completed actor_run_end",
+      pass: hasRunEndStatus(completed, "completed") && countRunEndEvents(completed) === 1,
+      detail: "hasCompletedEnd=" + hasRunEndStatus(completed, "completed") + ", runEndCount=" + countRunEndEvents(completed),
     },
   ];
 
