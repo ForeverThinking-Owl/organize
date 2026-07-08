@@ -1,6 +1,6 @@
 // ============================================================================
 // ActorRuntime — Actor Kernel 主执行器
-// v0.4.0: waiting runs use explicit suspend / resume lifecycle
+// v0.4.1: suspended runs can be dumped / restored as PendingRunSnapshot
 // ============================================================================
 
 import { ActorConfig } from "../core/types/actor";
@@ -23,7 +23,8 @@ import type { MemoryStore } from "../memory/memory-store";
 import { actorContextBuilder } from "./actor-context-builder";
 import { skillRuntime, SkillState, buildToolCallRequest } from "./skill-runtime";
 import { actorDecisionEngine } from "./actor-decision-engine";
-import { actorDecisionExecutor } from "./actor-decision-executor";
+import { actorDecisionExecutor, type PendingExecution } from "./actor-decision-executor";
+import { approvalGate } from "../approvals/approval-gate";
 import { memoryService } from "../memory/memory-service";
 import { traceLogger } from "../trace/trace-logger";
 import { loadRuntimeMemoryStore, saveRuntimeMemoryStore } from "./runtime-memory-store";
@@ -39,6 +40,13 @@ import {
   buildSkillApprovalRequest,
   type SkillApprovalRequest,
 } from "./wait-approval-runtime";
+import {
+  PENDING_RUN_SNAPSHOT_SCHEMA_VERSION,
+  type PendingRunKind,
+  type PendingRunSnapshot,
+  type PendingToolApprovalSnapshot,
+  type PendingToolExecutionSnapshot,
+} from "./pending-run-snapshot";
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -103,6 +111,10 @@ export type ActorContinueEvent =
   | { type: "human_input_response"; response: HumanInputResponse };
 
 let runCounter = 0;
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
 
 // ---------------------------------------------------------------------------
 // SkillConfig → Skill
@@ -243,6 +255,104 @@ export class ActorRuntime {
     pendingHumanInput?: HumanInputRequest;
     pendingSkillApproval?: SkillApprovalRequest;
   }> = new Map();
+
+  dumpPendingRun(actorRunId: string): PendingRunSnapshot | null {
+    const saved = this.runs.get(actorRunId);
+    if (!saved) return null;
+
+    if (saved.state.status !== "waiting_human_input" && saved.state.status !== "waiting_approval") {
+      return null;
+    }
+
+    let pendingKind: PendingRunKind | null = null;
+    let pendingToolApproval: PendingToolApprovalSnapshot | undefined;
+
+    if (saved.pendingHumanInput) {
+      pendingKind = "human_input";
+    } else if (saved.pendingSkillApproval) {
+      pendingKind = "skill_approval";
+    } else {
+      const activeRun = actorDecisionExecutor.getRun(actorRunId);
+      const pendingExec = activeRun?.pendingExec;
+      const approvalRequest = approvalGate.getPending(actorRunId);
+      if (pendingExec && approvalRequest) {
+        pendingKind = "tool_approval";
+        const pendingToolExec: PendingToolExecutionSnapshot = {
+          actorRunId: pendingExec.actorRunId,
+          actorId: pendingExec.actorId,
+          pendingToolCall: pendingExec.pendingToolCall,
+          pendingToolName: pendingExec.pendingToolName,
+          originatingStepKey: pendingExec.originatingStepKey,
+          originatingOutputKey: pendingExec.originatingOutputKey,
+          decisionOutputKey: pendingExec.decisionOutputKey,
+        };
+        pendingToolApproval = {
+          approvalRequest,
+          pendingExec: pendingToolExec,
+        };
+      }
+    }
+
+    if (!pendingKind) return null;
+
+    return cloneJson({
+      schemaVersion: PENDING_RUN_SNAPSHOT_SCHEMA_VERSION,
+      savedAt: new Date().toISOString(),
+      actorRunId,
+      actorId: saved.context.actor.actorId,
+      skillId: saved.skill.skillId,
+      status: saved.state.status as "waiting_human_input" | "waiting_approval",
+      pendingKind,
+      skill: saved.skill,
+      state: saved.state,
+      context: saved.context,
+      pendingHumanInput: saved.pendingHumanInput,
+      pendingSkillApproval: saved.pendingSkillApproval,
+      pendingToolApproval,
+    } as PendingRunSnapshot);
+  }
+
+  restorePendingRun(snapshot: PendingRunSnapshot): void {
+    if (snapshot.schemaVersion !== PENDING_RUN_SNAPSHOT_SCHEMA_VERSION) {
+      throw new Error("Unsupported PendingRunSnapshot schemaVersion: " + String(snapshot.schemaVersion));
+    }
+
+    const restored = cloneJson(snapshot);
+    restored.state.status = restored.status;
+
+    this.runs.set(restored.actorRunId, {
+      skill: restored.skill,
+      state: restored.state,
+      context: restored.context,
+      pendingHumanInput: restored.pendingHumanInput,
+      pendingSkillApproval: restored.pendingSkillApproval,
+    });
+
+    const pendingToolExec = restored.pendingToolApproval?.pendingExec;
+    const restoredPendingExec = pendingToolExec ? ({
+      ...pendingToolExec,
+      context: restored.context,
+      state: restored.state,
+    } as PendingExecution) : null;
+
+    actorDecisionExecutor.registerRun({
+      actorRunId: restored.actorRunId,
+      actorId: restored.actorId,
+      context: restored.context,
+      state: restored.state,
+      pendingExec: restoredPendingExec,
+    });
+
+    if (restored.pendingToolApproval) {
+      approvalGate.restorePending(restored.actorRunId, restored.pendingToolApproval.approvalRequest);
+    }
+  }
+
+  clearRun(actorRunId: string): void {
+    this.runs.delete(actorRunId);
+    actorDecisionExecutor.removeRun(actorRunId);
+    approvalGate.clearPending(actorRunId);
+  }
 
   async run(input: ActorRunInput): Promise<ActorRunOutput> {
     const actorRunId = `arun_${++runCounter}`;

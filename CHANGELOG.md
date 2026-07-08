@@ -8,16 +8,16 @@ README is the project entry point. Version history, verification coverage, and r
 
 ## Current State / 当前状态
 
-Current version: `v0.4.0 — General Waiting / Resume Model`
+Current version: `v0.4.1 — Persistent Pending Runs`
 
-当前版本：`v0.4.0 — General Waiting / Resume Model`
+当前版本：`v0.4.1 — Persistent Pending Runs`
 
 | Boundary / 边界 | Status / 状态 |
 |---|---|
-| Actor Kernel | Single-Actor loop supports ToolCall, tool approval, Skill wait_approval, human input, continue, Trace lifecycle, memory crystallization, store-backed runs, and persistent Trace snapshots. / 单 Actor 闭环已支持 ToolCall、工具审批、Skill wait_approval、human input、continue、Trace 生命周期、记忆沉淀、Store-backed run 与 Trace 快照持久化。 |
-| Waiting / Resume | Human input, Skill approval, and ToolCall approval now share explicit suspend / resume lifecycle Trace events. / human input、Skill approval、ToolCall approval 已统一使用显式 suspend / resume 生命周期 Trace。 |
+| Actor Kernel | Single-Actor loop supports ToolCall, tool approval, Skill wait_approval, human input, continue, Trace lifecycle, memory crystallization, store-backed runs, persistent Trace snapshots, and persistent pending runs. / 单 Actor 闭环已支持 ToolCall、工具审批、Skill wait_approval、human input、continue、Trace 生命周期、记忆沉淀、Store-backed run、Trace 快照持久化与 pending run 持久化。 |
+| Waiting / Resume | Human input, Skill approval, and ToolCall approval share explicit suspend / resume lifecycle Trace events. / human input、Skill approval、ToolCall approval 已统一使用显式 suspend / resume 生命周期 Trace。 |
+| Pending Runs | Suspended runs can be dumped, saved, restored, and resumed through `continue()`. / suspended run 可导出、保存、恢复，并通过 `continue()` 继续执行。 |
 | Skill Runtime | Strict step parsing, first-class transform execution, human_input waiting, wait_approval waiting, return output mapping, and explicit unsupported-step errors are available. / 已支持严格 step 解析、transform 一等执行、human_input 等待、wait_approval 等待、return output mapping、未支持步骤显式报错。 |
-| LLM Gateway | Supports mock / real structured-output mode. / 支持 mock / real 结构化输出模式。 |
 | Policy / Approval | Tool permission, autonomy level, before_call approval, and Skill-step approval are wired in. / Tool 权限、自主等级、before_call 审批与 Skill-step 审批已接入。 |
 | Memory Store | `MemoryStore`, `JsonMemoryStore`, and Runtime Store Binding are verified. / `MemoryStore`、`JsonMemoryStore` 与 Runtime Store Binding 已验证。 |
 | Trace Persistence | `TraceSnapshot`, `TraceStore`, `JsonTraceStore`, and TraceLogger dump / restore are verified. / `TraceSnapshot`、`TraceStore`、`JsonTraceStore` 与 TraceLogger dump / restore 已验证。 |
@@ -38,28 +38,59 @@ Current version: `v0.4.0 — General Waiting / Resume Model`
 | `npm run demo:human:input` | Human Input Runtime demo, 10 checks / Human Input Runtime Demo，10 条验收 |
 | `npm run demo:wait:approval` | Wait Approval Runtime demo, 10 checks / Wait Approval Runtime Demo，10 条验收 |
 | `npm run demo:waiting:resume` | General Waiting / Resume demo, 15 checks / 通用等待恢复 Demo，15 条验收 |
+| `npm run demo:pending:run` | Pending Run Persistence demo, 18 checks / Pending Run 持久化 Demo，18 条验收 |
 
 ---
 
-## Planned: v0.4.1 — Persistent Pending Runs
+## Planned: v0.4.2 — Runtime Recovery Bundle
 
-Goal: define what it means to persist a suspended run and later resume it safely.
+Goal: define a coordinated recovery package that combines pending runtime state, trace state, and memory state without collapsing their boundaries.
 
-目标：定义 suspended run 如何持久化，并在之后安全恢复执行。
+目标：定义一个组合恢复包，让 pending runtime state、trace state、memory state 可以协同恢复，同时不混淆三者边界。
 
 Possible scope / 可能范围：
 
-- Add a pending run snapshot boundary for waiting runs.
-- Decide what runtime state must be serializable for resume.
-- Keep Trace / Memory persistence separate but compatible.
+- Add a recovery bundle schema that references or contains PendingRunSnapshot, TraceSnapshot, and MemorySnapshot.
+- Add a demo that restores pending runtime state plus trace and memory state together.
+- Keep stores separable and replaceable.
 - Keep all existing demos green.
 
 中文可能范围：
 
-- 新增 waiting run 的 pending run snapshot 边界。
-- 明确哪些 Runtime state 必须可序列化才能恢复。
-- 让 Trace / Memory persistence 保持分离但可协同。
+- 新增 recovery bundle schema，引用或包含 PendingRunSnapshot、TraceSnapshot、MemorySnapshot。
+- 新增 demo，联合恢复 pending runtime state、trace state 与 memory state。
+- 保持各类 Store 独立可替换。
 - 保持现有 demos 全部通过。
+
+---
+
+## v0.4.1 — Persistent Pending Runs
+
+- Added `PendingRunSnapshot` schema: `pending_run.snapshot.v1`.
+- Added `PendingRunStore` interface: `load()`, `save()`, `delete()`, `list()`, `clear()`.
+- Implemented `JsonPendingRunStore` with JSON store snapshot validation.
+- Added pending run persistence helpers.
+- Added `ActorRuntime.dumpPendingRun()`, `restorePendingRun()`, and `clearRun()`.
+- Added `ApprovalGate.restorePending()` and `clearPending()` so ToolCall approvals can be restored.
+- Pending snapshots keep execution state separate from TraceSnapshot and MemorySnapshot.
+- Covered human_input, Skill wait_approval, and ToolCall approval pending restore flows.
+- Added `demo:pending:run` with 18 checks.
+- Added Pending Run Persistence Demo to CI.
+- Updated README and package metadata to v0.4.1.
+
+中文：
+
+- 新增 `PendingRunSnapshot` schema：`pending_run.snapshot.v1`。
+- 新增 `PendingRunStore` 接口：`load()`、`save()`、`delete()`、`list()`、`clear()`。
+- 实现带 JSON store snapshot 校验的 `JsonPendingRunStore`。
+- 新增 pending run persistence helper。
+- 新增 `ActorRuntime.dumpPendingRun()`、`restorePendingRun()`、`clearRun()`。
+- 新增 `ApprovalGate.restorePending()` 与 `clearPending()`，确保 ToolCall approval 可恢复。
+- Pending snapshot 与 TraceSnapshot、MemorySnapshot 保持边界分离。
+- 覆盖 human_input、Skill wait_approval、ToolCall approval 三类 pending restore 流程。
+- 新增 `demo:pending:run`，包含 18 条验收。
+- CI 增加 Pending Run Persistence Demo。
+- README 与 package 元数据对齐到 v0.4.1。
 
 ---
 
@@ -76,22 +107,6 @@ Possible scope / 可能范围：
 - Added `demo:waiting:resume` with 15 checks across all three waiting boundaries.
 - Added General Waiting Resume Demo to CI.
 - Updated README and package metadata to v0.4.0.
-
-中文：
-
-- 新增 `actor_run_suspended` 与 `actor_run_resumed` Trace 事件类型。
-- 新增 `TraceLogger.suspendRun()` 与 `TraceLogger.resumeRun()`。
-- `TraceLogger.endRun()` 限定为真正终局：`completed` / `error`。
-- human input 等待改为记录 `actor_run_suspended(waitingKind=human_input)`，不再记录 `actor_run_end(waiting_human_input)`。
-- Skill wait approval 等待改为记录 `actor_run_suspended(waitingKind=skill_approval)`。
-- ToolCall approval 等待改为记录 `actor_run_suspended(waitingKind=tool_approval)`。
-- 三类 continue 路径都会记录 `actor_run_resumed`。
-- 更新 human input 与 wait approval demo，验证 suspend / resume 生命周期。
-- 新增 `demo:waiting:resume`，覆盖三类等待边界共 15 条验收。
-- CI 增加 General Waiting Resume Demo。
-- README 与 package 元数据对齐到 v0.4.0。
-
----
 
 ## v0.3.9 — Wait Approval Runtime Semantics
 
