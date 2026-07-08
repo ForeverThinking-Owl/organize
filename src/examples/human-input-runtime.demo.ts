@@ -111,6 +111,7 @@ async function main() {
 
   const requestedEvent = findEvent(waiting, "human_input_requested");
   const suspendedEvent = findEvent(waiting, "actor_run_suspended");
+  const waitingRunEndCount = countRunEndEvents(waiting);
   console.log("  Status: " + waiting.status);
   console.log("  PendingHumanInput: " + JSON.stringify(waiting.pendingHumanInput ?? null));
   console.log("  HumanInputRequested: " + JSON.stringify(requestedEvent?.data ?? null));
@@ -167,8 +168,8 @@ async function main() {
       pass:
         suspendedEvent?.data.status === "waiting_human_input" &&
         suspendedEvent.data.waitingKind === "human_input" &&
-        countRunEndEvents(waiting) === 0,
-      detail: "suspended=" + JSON.stringify(suspendedEvent?.data ?? null) + ", runEndCount=" + countRunEndEvents(waiting),
+        waitingRunEndCount === 0,
+      detail: "suspended=" + JSON.stringify(suspendedEvent?.data ?? null) + ", waitingRunEndCount=" + waitingRunEndCount,
     },
     {
       label: "continue(human_input_response) 后恢复并 completed",
