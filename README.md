@@ -23,6 +23,8 @@ Trace 记录：start / suspended / resumed / end
   ↓
 Runtime Recovery Bundle：PendingRun + Trace + Memory 可组合保存与恢复
   ↓
+跨进程恢复：process A save bundle，process B load / restore / continue
+  ↓
 沉淀 Memory：候选、策略、去重、检索、持久化
 ```
 
@@ -31,10 +33,10 @@ Runtime Recovery Bundle：PendingRun + Trace + Memory 可组合保存与恢复
 ## 当前版本
 
 ```text
-v0.4.2 — Runtime Recovery Bundle
+v0.4.3 — Cross-process Recovery Demo
 ```
 
-当前版本在 v0.4.1 Persistent Pending Runs 基础上，新增 `RuntimeRecoveryBundle`：把 `PendingRunSnapshot`、`TraceSnapshot`、`MemorySnapshot` 组合成一个可恢复运行包。恢复时仍保持三者边界独立：Memory 负责经验状态，Trace 负责审计链路，PendingRun 负责继续执行。
+当前版本在 v0.4.2 Runtime Recovery Bundle 基础上，新增跨进程恢复 Demo：一个子进程 run 到 suspended 并保存 `RuntimeRecoveryBundle` 到 JSON store，另一个子进程重新启动、重新注册工具、加载 bundle、恢复 Runtime / Trace / Memory，并通过 `continue()` 完成执行。`human_input`、Skill `wait_approval`、ToolCall approval 三类等待边界都已覆盖。
 
 版本历史、验收矩阵、CI 覆盖和下一步计划见 [CHANGELOG.md](./CHANGELOG.md)。
 
@@ -52,6 +54,7 @@ v0.4.2 — Runtime Recovery Bundle
 | PendingRunSnapshot | 恢复 suspended run 执行所需的 Runtime state，不包含 Trace / Memory。 |
 | RuntimeRecoveryBundle | 组合 PendingRunSnapshot、TraceSnapshot、MemorySnapshot 的恢复包。 |
 | RuntimeRecoveryStore | recovery bundle 存储抽象，目前由 `JsonRuntimeRecoveryStore` 实现。 |
+| Cross-process Recovery | 通过磁盘 bundle 让不同进程完成 save / restore / continue。 |
 | MemoryStore | 记忆快照存储抽象，目前由 `JsonMemoryStore` 实现，可绑定到 ActorRuntime run 生命周期。 |
 | TraceStore | Trace 快照存储抽象，目前由 `JsonTraceStore` 实现。 |
 
@@ -59,18 +62,15 @@ v0.4.2 — Runtime Recovery Bundle
 
 ```text
 ActorRuntime
+  ├─ Cross-process Recovery Demo
+  │    ├─ process A: run → suspended → save RuntimeRecoveryBundle
+  │    └─ process B: load → restore → continue → completed
   ├─ Runtime Recovery Bundle
   │    ├─ PendingRunSnapshot
   │    ├─ TraceSnapshot
   │    └─ MemorySnapshot
   ├─ Pending Run Persistence
-  │    ├─ dumpPendingRun(actorRunId)
-  │    ├─ restorePendingRun(snapshot)
-  │    └─ clearRun(actorRunId)
   ├─ General Waiting / Resume Model
-  │    ├─ human_input          → waiting_human_input
-  │    ├─ wait_approval        → waiting_approval + approvalKind=skill_step
-  │    └─ tool_call approval   → waiting_approval + approvalKind=tool_call
   ├─ Runtime MemoryStore Binding
   ├─ ActorContextBuilder
   ├─ SkillRuntime
@@ -110,9 +110,32 @@ npm run demo:wait:approval         # Wait Approval Runtime Demo
 npm run demo:waiting:resume        # General Waiting / Resume Demo
 npm run demo:pending:run           # Pending Run Persistence Demo
 npm run demo:recovery:bundle       # Runtime Recovery Bundle Demo
+npm run demo:recovery:cross-process # Cross-process Recovery Demo
 npm run typecheck                  # TypeScript type-check
 npm run build                      # Compile
 ```
+
+## Cross-process Recovery
+
+v0.4.3 的 demo 使用 Node 子进程模拟真实进程边界：
+
+```text
+process A
+  → register tools
+  → run 到 waiting
+  → createRuntimeRecoveryBundle(actorRunId)
+  → JsonRuntimeRecoveryStore.save(bundle)
+  → exit
+
+process B
+  → register tools
+  → JsonRuntimeRecoveryStore.load(actorRunId)
+  → restoreRuntimeRecoveryBundle(bundle)
+  → continue(...)
+  → completed
+```
+
+工具定义和 executor 不会被序列化到 bundle；它们仍由应用启动时显式注册。Bundle 只保存运行状态、Trace 状态和 Memory 状态。
 
 ## Runtime Recovery Bundle
 
@@ -124,22 +147,6 @@ TraceSnapshot      = 可审计复盘的 Trace state
 MemorySnapshot     = 可长期沉淀的经验 state
 ```
 
-示例：
-
-```ts
-const bundle = createRuntimeRecoveryBundle(actorRunId);
-await recoveryStore.save(bundle);
-
-actorRuntime.clearRun(actorRunId);
-traceLogger.clear();
-memoryService.clear();
-
-const restored = await recoveryStore.load(actorRunId);
-restoreRuntimeRecoveryBundle(restored);
-
-await actorRuntime.continue(actorRunId, continueEvent);
-```
-
 恢复顺序固定为：
 
 ```text
@@ -148,42 +155,11 @@ MemorySnapshot → TraceSnapshot → PendingRunSnapshot
 
 这样 continue 之后可以把 `actor_run_resumed` / `actor_run_end` 接回旧 Trace，同时用恢复后的 MemoryService 继续去重和沉淀经验。
 
-## 等待 / 恢复生命周期
-
-```text
-human_input
-  → actor_run_suspended(waitingKind=human_input)
-  → continue(human_input_response)
-  → actor_run_resumed(waitingKind=human_input)
-  → actor_run_end(completed/error)
-
-wait_approval
-  → actor_run_suspended(waitingKind=skill_approval)
-  → continue(approval_decision)
-  → actor_run_resumed(waitingKind=skill_approval)
-  → actor_run_end(completed/error)
-
-tool_call approval
-  → actor_run_suspended(waitingKind=tool_approval)
-  → continue(approval_decision)
-  → actor_run_resumed(waitingKind=tool_approval)
-  → actor_run_end(completed/error)
-```
-
-## 记忆、Trace 与存储
-
-```text
-RuntimeRecoveryStore: load / save / delete / list / clear
-PendingRunStore:      load / save / delete / list / clear
-MemoryStore:          load / save / clear
-TraceStore:           load / save / clear
-```
-
 ## 项目状态
 
 当前仍是实验性 Actor Kernel。重点不是一次做完所有能力，而是逐步明确边界：Actor、Skill、Tool、Policy、Approval、Trace、Memory、Store 都先形成最小可运行闭环，再逐步硬化。
 
-下一阶段将继续推进运行时正确性，尤其是跨进程恢复 Demo、更通用的外部事件等待和恢复边界安全性。
+下一阶段将继续推进运行时正确性，尤其是外部事件等待、恢复边界安全性和更真实的进程级恢复入口。
 
 ---
 
@@ -198,10 +174,10 @@ organize is an Actor Kernel prototype for self-operating organizations. It treat
 ## Current Version
 
 ```text
-v0.4.2 — Runtime Recovery Bundle
+v0.4.3 — Cross-process Recovery Demo
 ```
 
-This version adds `RuntimeRecoveryBundle`, a coordinated recovery package that combines `PendingRunSnapshot`, `TraceSnapshot`, and `MemorySnapshot` while keeping their boundaries independent.
+This version adds a cross-process recovery demo on top of `RuntimeRecoveryBundle`: one process-like phase saves a suspended run bundle to JSON, and another process-like phase reloads tools, loads the bundle, restores Runtime / Trace / Memory, and continues the run to completion.
 
 ## Verification Scripts
 
@@ -218,23 +194,22 @@ npm run demo:wait:approval
 npm run demo:waiting:resume
 npm run demo:pending:run
 npm run demo:recovery:bundle
+npm run demo:recovery:cross-process
 npm run typecheck
 npm run build
 ```
 
-## Runtime Recovery Bundle
+## Cross-process Recovery
 
 ```text
-RuntimeRecoveryBundle
-  ├─ PendingRunSnapshot  # resume execution
-  ├─ TraceSnapshot       # continue audit trail
-  └─ MemorySnapshot      # continue memory retrieval / dedup / crystallization
+process A: run → suspended → save RuntimeRecoveryBundle → exit
+process B: register tools → load bundle → restore → continue → completed
 ```
 
-The public Runtime API remains `run()` / `continue()`. Recovery helpers compose the existing boundaries instead of replacing them.
+The bundle carries state. Tool registration remains application-owned.
 
 ## Project Status
 
 This is still an experimental Actor Kernel. The goal is not to implement every capability at once, but to make each boundary explicit and verifiable: Actor, Skill, Tool, Policy, Approval, Trace, Memory, and Store now have a minimal running loop that can be hardened incrementally.
 
-The next stage will continue improving runtime correctness, especially cross-process recovery demos, broader external-event waiting semantics, and safer recovery boundaries.
+The next stage will continue improving runtime correctness, especially external-event waiting, safer recovery boundaries, and more realistic process-level recovery entry points.

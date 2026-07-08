@@ -64,3 +64,6 @@ jobs:
 
       - name: Runtime Recovery Bundle Demo
         run: npm run demo:recovery:bundle
+
+      - name: Cross Process Recovery Demo
+        run: npm run demo:recovery:cross-process
