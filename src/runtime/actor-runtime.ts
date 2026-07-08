@@ -23,7 +23,7 @@ import type { MemoryStore } from "../memory/memory-store";
 import { actorContextBuilder } from "./actor-context-builder";
 import { skillRuntime, SkillState, buildToolCallRequest } from "./skill-runtime";
 import { actorDecisionEngine } from "./actor-decision-engine";
-import { actorDecisionExecutor } from "./actor-decision-executor";
+import { actorDecisionExecutor, type PendingExecution } from "./actor-decision-executor";
 import { approvalGate } from "../approvals/approval-gate";
 import { memoryService } from "../memory/memory-service";
 import { traceLogger } from "../trace/trace-logger";
@@ -44,6 +44,7 @@ import {
   PENDING_RUN_SNAPSHOT_SCHEMA_VERSION,
   type PendingRunKind,
   type PendingRunSnapshot,
+  type PendingToolApprovalSnapshot,
   type PendingToolExecutionSnapshot,
 } from "./pending-run-snapshot";
 
@@ -264,8 +265,7 @@ export class ActorRuntime {
     }
 
     let pendingKind: PendingRunKind | null = null;
-    let pendingToolExec: PendingToolExecutionSnapshot | undefined;
-    let pendingToolApproval: PendingRunSnapshot["pendingToolApproval"];
+    let pendingToolApproval: PendingToolApprovalSnapshot | undefined;
 
     if (saved.pendingHumanInput) {
       pendingKind = "human_input";
@@ -277,7 +277,7 @@ export class ActorRuntime {
       const approvalRequest = approvalGate.getPending(actorRunId);
       if (pendingExec && approvalRequest) {
         pendingKind = "tool_approval";
-        pendingToolExec = {
+        const pendingToolExec: PendingToolExecutionSnapshot = {
           actorRunId: pendingExec.actorRunId,
           actorId: pendingExec.actorId,
           pendingToolCall: pendingExec.pendingToolCall,
@@ -295,7 +295,7 @@ export class ActorRuntime {
 
     if (!pendingKind) return null;
 
-    const snapshot: PendingRunSnapshot = {
+    return cloneJson({
       schemaVersion: PENDING_RUN_SNAPSHOT_SCHEMA_VERSION,
       savedAt: new Date().toISOString(),
       actorRunId,
@@ -309,9 +309,7 @@ export class ActorRuntime {
       pendingHumanInput: saved.pendingHumanInput,
       pendingSkillApproval: saved.pendingSkillApproval,
       pendingToolApproval,
-    };
-
-    return cloneJson(snapshot);
+    } as PendingRunSnapshot);
   }
 
   restorePendingRun(snapshot: PendingRunSnapshot): void {
@@ -331,16 +329,18 @@ export class ActorRuntime {
     });
 
     const pendingToolExec = restored.pendingToolApproval?.pendingExec;
+    const restoredPendingExec = pendingToolExec ? ({
+      ...pendingToolExec,
+      context: restored.context,
+      state: restored.state,
+    } as PendingExecution) : null;
+
     actorDecisionExecutor.registerRun({
       actorRunId: restored.actorRunId,
       actorId: restored.actorId,
       context: restored.context,
       state: restored.state,
-      pendingExec: pendingToolExec ? {
-        ...pendingToolExec,
-        context: restored.context,
-        state: restored.state,
-      } : null,
+      pendingExec: restoredPendingExec,
     });
 
     if (restored.pendingToolApproval) {
