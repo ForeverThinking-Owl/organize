@@ -121,6 +121,13 @@ export class ApprovalGate {
   }
 
   /**
+   * v0.4.1: 清理单个 run 的待审批请求。
+   */
+  clearPending(actorRunId: string): void {
+    this.pendingApprovals.delete(actorRunId);
+  }
+
+  /**
    * 外部提交审批决策（continue 流程入口）
    */
   submitDecision(
