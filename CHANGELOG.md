@@ -8,14 +8,14 @@ README is the project entry point. Version history, verification coverage, and r
 
 ## Current State / 当前状态
 
-Current version: `v0.4.2 — Runtime Recovery Bundle`
+Current version: `v0.4.3 — Cross-process Recovery Demo`
 
-当前版本：`v0.4.2 — Runtime Recovery Bundle`
+当前版本：`v0.4.3 — Cross-process Recovery Demo`
 
 | Boundary / 边界 | Status / 状态 |
 |---|---|
-| Actor Kernel | Single-Actor loop supports ToolCall, tool approval, Skill wait_approval, human input, continue, Trace lifecycle, memory crystallization, store-backed runs, persistent Trace snapshots, persistent pending runs, and coordinated recovery bundles. / 单 Actor 闭环已支持 ToolCall、工具审批、Skill wait_approval、human input、continue、Trace 生命周期、记忆沉淀、Store-backed run、Trace 快照持久化、pending run 持久化与组合恢复包。 |
-| Runtime Recovery | `RuntimeRecoveryBundle` coordinates PendingRunSnapshot, TraceSnapshot, and MemorySnapshot without collapsing their boundaries. / `RuntimeRecoveryBundle` 协调 PendingRunSnapshot、TraceSnapshot、MemorySnapshot，同时保持三者边界独立。 |
+| Actor Kernel | Single-Actor loop supports ToolCall, tool approval, Skill wait_approval, human input, continue, Trace lifecycle, memory crystallization, store-backed runs, persistent Trace snapshots, persistent pending runs, coordinated recovery bundles, and process-boundary recovery validation. / 单 Actor 闭环已支持 ToolCall、工具审批、Skill wait_approval、human input、continue、Trace 生命周期、记忆沉淀、Store-backed run、Trace 快照持久化、pending run 持久化、组合恢复包与进程边界恢复验证。 |
+| Runtime Recovery | `RuntimeRecoveryBundle` coordinates PendingRunSnapshot, TraceSnapshot, and MemorySnapshot, and the cross-process demo verifies save in one process-like phase and restore / continue in another. / `RuntimeRecoveryBundle` 协调 PendingRunSnapshot、TraceSnapshot、MemorySnapshot，cross-process demo 验证一个 process-like 阶段保存，另一个阶段恢复并继续执行。 |
 | Waiting / Resume | Human input, Skill approval, and ToolCall approval share explicit suspend / resume lifecycle Trace events. / human input、Skill approval、ToolCall approval 已统一使用显式 suspend / resume 生命周期 Trace。 |
 | Pending Runs | Suspended runs can be dumped, saved, restored, and resumed through `continue()`. / suspended run 可导出、保存、恢复，并通过 `continue()` 继续执行。 |
 | Skill Runtime | Strict step parsing, first-class transform execution, human_input waiting, wait_approval waiting, return output mapping, and explicit unsupported-step errors are available. / 已支持严格 step 解析、transform 一等执行、human_input 等待、wait_approval 等待、return output mapping、未支持步骤显式报错。 |
@@ -41,28 +41,53 @@ Current version: `v0.4.2 — Runtime Recovery Bundle`
 | `npm run demo:waiting:resume` | General Waiting / Resume demo, 15 checks / 通用等待恢复 Demo，15 条验收 |
 | `npm run demo:pending:run` | Pending Run Persistence demo, 18 checks / Pending Run 持久化 Demo，18 条验收 |
 | `npm run demo:recovery:bundle` | Runtime Recovery Bundle demo, 21 checks / Runtime Recovery Bundle Demo，21 条验收 |
+| `npm run demo:recovery:cross-process` | Cross-process Recovery demo, 18 checks / 跨进程恢复 Demo，18 条验收 |
 
 ---
 
-## Planned: v0.4.3 — Cross-process Recovery Demo
+## Planned: v0.4.4 — External Event Waiting
 
-Goal: demonstrate a more realistic process-boundary recovery flow using the runtime recovery bundle boundary.
+Goal: add a new waiting boundary for external events while reusing the lifecycle, recovery, and persistence foundations built in v0.4.0–v0.4.3.
 
-目标：基于 Runtime Recovery Bundle，验证更接近真实进程边界的恢复流程。
+目标：新增外部事件等待边界，并复用 v0.4.0–v0.4.3 已完成的 lifecycle、recovery 与 persistence 基础。
 
 Possible scope / 可能范围：
 
-- Split recovery demo into a save phase and restore phase.
-- Verify a bundle created by one process-like phase can be restored by another process-like phase.
-- Keep tool registration explicitly application-owned.
+- Define `wait_external_event` Skill step semantics.
+- Add pending external event request / response shape.
+- Ensure pending external-event runs can enter suspend / resume and recovery bundle flows.
 - Keep all existing demos green.
 
 中文可能范围：
 
-- 将恢复 demo 拆成保存阶段与恢复阶段。
-- 验证一个 process-like 阶段创建的 bundle 能被另一个 process-like 阶段恢复。
-- 保持工具注册由应用启动显式负责。
+- 定义 `wait_external_event` Skill step 语义。
+- 新增 pending external event request / response 结构。
+- 确保外部事件等待 run 可以接入 suspend / resume 与 recovery bundle 流程。
 - 保持现有 demos 全部通过。
+
+---
+
+## v0.4.3 — Cross-process Recovery Demo
+
+- Added `demo:recovery:cross-process`.
+- Added `cross-process-recovery.demo.ts` with parent / save / restore phases.
+- Save phase runs to suspended state, creates RuntimeRecoveryBundle, and stores it in `JsonRuntimeRecoveryStore`.
+- Restore phase starts from a fresh process-like runtime, registers tools, loads the bundle, restores Runtime / Trace / Memory, and continues to completion.
+- Covered human_input, Skill wait_approval, and ToolCall approval across process-like boundaries.
+- Verified ToolCall approval can restore pending executor state and execute the pending ToolCall after tool executors are re-registered.
+- Added Cross Process Recovery Demo to CI.
+- Updated README and package metadata to v0.4.3.
+
+中文：
+
+- 新增 `demo:recovery:cross-process`。
+- 新增 `cross-process-recovery.demo.ts`，包含 parent / save / restore 三种模式。
+- save phase 运行到 suspended，创建 RuntimeRecoveryBundle，并保存到 `JsonRuntimeRecoveryStore`。
+- restore phase 从全新 process-like runtime 启动，重新注册工具，加载 bundle，恢复 Runtime / Trace / Memory，并继续执行到 completed。
+- 覆盖 human_input、Skill wait_approval、ToolCall approval 三类进程边界恢复。
+- 验证 ToolCall approval 可以恢复 pending executor state，并在重新注册 tool executor 后执行 pending ToolCall。
+- CI 增加 Cross Process Recovery Demo。
+- README 与 package 元数据对齐到 v0.4.3。
 
 ---
 
@@ -79,22 +104,6 @@ Possible scope / 可能范围：
 - Added `demo:recovery:bundle` with 21 checks.
 - Added Runtime Recovery Bundle Demo to CI.
 - Updated README and package metadata to v0.4.2.
-
-中文：
-
-- 新增 `RuntimeRecoveryBundle` schema：`runtime_recovery.bundle.v1`。
-- 新增 `RuntimeRecoveryStore` 接口：`load()`、`save()`、`delete()`、`list()`、`clear()`。
-- 实现带 JSON store snapshot 校验的 `JsonRuntimeRecoveryStore`。
-- 新增 runtime recovery persistence helper。
-- 新增 `createRuntimeRecoveryBundle(actorRunId)` 与 `restoreRuntimeRecoveryBundle(bundle)`。
-- Recovery bundle 组合 `PendingRunSnapshot`、`TraceSnapshot`、`MemorySnapshot`，但不混淆三者边界。
-- 恢复顺序为 MemorySnapshot → TraceSnapshot → PendingRunSnapshot。
-- 覆盖 human_input、Skill wait_approval、ToolCall approval 三类 bundle restore 流程。
-- 新增 `demo:recovery:bundle`，包含 21 条验收。
-- CI 增加 Runtime Recovery Bundle Demo。
-- README 与 package 元数据对齐到 v0.4.2。
-
----
 
 ## v0.4.1 — Persistent Pending Runs
 
