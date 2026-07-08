@@ -1,12 +1,13 @@
 // ============================================================================
 // PendingRunSnapshot
-// v0.4.1: serializable suspended-run state required to resume execution
+// v0.4.4: serializable suspended-run state includes external event waits
 // ============================================================================
 
 import type { ActorContext } from "../core/types/actor";
 import type { ApprovalRequest } from "../core/types/approval";
 import type { Skill } from "../core/types/skill";
 import type { ToolCallRequest } from "../core/types/tool";
+import type { ExternalEventRequest } from "./external-event-runtime";
 import type { HumanInputRequest } from "./human-input-runtime";
 import type { SkillState } from "./skill-runtime";
 import type { SkillApprovalRequest } from "./wait-approval-runtime";
@@ -14,8 +15,8 @@ import type { SkillApprovalRequest } from "./wait-approval-runtime";
 export const PENDING_RUN_SNAPSHOT_SCHEMA_VERSION = "pending_run.snapshot.v1";
 export const PENDING_RUN_STORE_SCHEMA_VERSION = "pending_run.store.v1";
 
-export type PendingRunStatus = "waiting_human_input" | "waiting_approval";
-export type PendingRunKind = "human_input" | "skill_approval" | "tool_approval";
+export type PendingRunStatus = "waiting_human_input" | "waiting_approval" | "waiting_external_event";
+export type PendingRunKind = "human_input" | "skill_approval" | "tool_approval" | "external_event";
 
 export interface PendingToolExecutionSnapshot {
   actorRunId: string;
@@ -49,6 +50,7 @@ export interface PendingRunSnapshot {
   pendingHumanInput?: HumanInputRequest;
   pendingSkillApproval?: SkillApprovalRequest;
   pendingToolApproval?: PendingToolApprovalSnapshot;
+  pendingExternalEvent?: ExternalEventRequest;
 }
 
 export interface PendingRunStoreSnapshot {
