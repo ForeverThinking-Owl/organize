@@ -116,10 +116,10 @@ export function assertPendingRunStoreSnapshot(value: unknown): asserts value is 
 
 function emptyStoreSnapshot(): PendingRunStoreSnapshot {
   return {
-    schemaVersion: PENDING_RUN_STORE_VERSION,
+    schemaVersion: PENDING_RUN_STORE_SCHEMA_VERSION,
     savedAt: new Date().toISOString(),
     runs: [],
-  } as PendingRunStoreSnapshot;
+  };
 }
 
 export async function savePendingRunStoreSnapshot(filePath: string, snapshot: PendingRunStoreSnapshot): Promise<void> {
@@ -142,11 +142,7 @@ export class JsonPendingRunStore implements PendingRunStore {
     try {
       return await loadPendingRunStoreSnapshot(this.filePath);
     } catch (error) {
-      if (isFileNotFound(error)) return {
-        schemaVersion: PENDING_RUN_STORE_SCHEMA_VERSION,
-        savedAt: new Date().toISOString(),
-        runs: [],
-      };
+      if (isFileNotFound(error)) return emptyStoreSnapshot();
       throw error;
     }
   }
