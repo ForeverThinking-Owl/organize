@@ -1,6 +1,6 @@
 // ============================================================================
 // ActorRuntime — Actor Kernel 主执行器
-// v0.4.4: wait_external_event 支持一等 waiting / continue / recovery 语义
+// v0.4.5: wait_external_event validates payload / correlation before resume
 // ============================================================================
 
 import { ActorConfig } from "../core/types/actor";
@@ -47,6 +47,7 @@ import {
   type ExternalEventReceived,
   type ExternalEventRequest,
 } from "./external-event-runtime";
+import { validateExternalEventReceived } from "./external-event-validation";
 import {
   PENDING_RUN_SNAPSHOT_SCHEMA_VERSION,
   type PendingRunKind,
@@ -55,12 +56,7 @@ import {
   type PendingToolExecutionSnapshot,
 } from "./pending-run-snapshot";
 
-// ---------------------------------------------------------------------------
-// 类型
-// ---------------------------------------------------------------------------
-
 export interface ActorRuntimeOptions {
-  /** Optional store-backed memory lifecycle for this run. */
   memoryStore?: MemoryStore;
 }
 
@@ -125,10 +121,6 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-// ---------------------------------------------------------------------------
-// SkillConfig → Skill
-// ---------------------------------------------------------------------------
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -192,7 +184,6 @@ function parseSkillStep(config: SkillStepConfig): SkillStep {
         inputMapping: requiredMapping(config, "input_mapping"),
         outputKey: requiredString(config, "output_key"),
       } as ToolCallStep;
-
     case "llm_judge":
       return {
         ...base,
@@ -201,7 +192,6 @@ function parseSkillStep(config: SkillStepConfig): SkillStep {
         outputKey: requiredString(config, "output_key"),
         outputSchema: isRecord(config.output_schema) ? config.output_schema : undefined,
       } as LLMJudgeStep;
-
     case "transform":
       return {
         ...base,
@@ -209,14 +199,12 @@ function parseSkillStep(config: SkillStepConfig): SkillStep {
         mapping: requiredMapping(config, "mapping"),
         outputKey: requiredString(config, "output_key"),
       } as TransformStep;
-
     case "return":
       return {
         ...base,
         type: "return",
         outputMapping: optionalMapping(config, "output_mapping"),
       } as ReturnStep;
-
     case "human_input":
       return {
         ...base,
@@ -224,7 +212,6 @@ function parseSkillStep(config: SkillStepConfig): SkillStep {
         prompt: requiredString(config, "prompt"),
         outputKey: requiredString(config, "output_key"),
       } as HumanInputStep;
-
     case "wait_approval":
       return {
         ...base,
@@ -233,7 +220,6 @@ function parseSkillStep(config: SkillStepConfig): SkillStep {
         reason: requiredString(config, "reason"),
         outputKey: requiredString(config, "output_key"),
       } as WaitApprovalStep;
-
     case "wait_external_event":
       return {
         ...base,
@@ -244,10 +230,8 @@ function parseSkillStep(config: SkillStepConfig): SkillStep {
         outputKey: requiredString(config, "output_key"),
         eventSchema: isRecord(config.event_schema) ? config.event_schema : undefined,
       } as WaitExternalEventStep;
-
     case "end":
       return { ...base, type: "end" } as EndStep;
-
     default:
       throw new Error(`Unsupported skill step type: ${String(config.type)} at step ${config.step_key}`);
   }
@@ -263,10 +247,6 @@ function parseSkill(config: SkillConfig, actorId: string): Skill {
   };
 }
 
-// ---------------------------------------------------------------------------
-// ActorRuntime
-// ---------------------------------------------------------------------------
-
 export class ActorRuntime {
   private runs: Map<string, {
     skill: Skill; state: SkillState;
@@ -280,10 +260,7 @@ export class ActorRuntime {
   dumpPendingRun(actorRunId: string): PendingRunSnapshot | null {
     const saved = this.runs.get(actorRunId);
     if (!saved) return null;
-
-    if (saved.state.status !== "waiting_human_input" && saved.state.status !== "waiting_approval" && saved.state.status !== "waiting_external_event") {
-      return null;
-    }
+    if (saved.state.status !== "waiting_human_input" && saved.state.status !== "waiting_approval" && saved.state.status !== "waiting_external_event") return null;
 
     let pendingKind: PendingRunKind | null = null;
     let pendingToolApproval: PendingToolApprovalSnapshot | undefined;
@@ -309,10 +286,7 @@ export class ActorRuntime {
           originatingOutputKey: pendingExec.originatingOutputKey,
           decisionOutputKey: pendingExec.decisionOutputKey,
         };
-        pendingToolApproval = {
-          approvalRequest,
-          pendingExec: pendingToolExec,
-        };
+        pendingToolApproval = { approvalRequest, pendingExec: pendingToolExec };
       }
     }
 
@@ -387,9 +361,7 @@ export class ActorRuntime {
 
     try {
       const memoryLoaded = await loadRuntimeMemoryStore(actorRunId, memoryStore);
-      if (!memoryLoaded) {
-        throw new Error("MemoryStore load failed");
-      }
+      if (!memoryLoaded) throw new Error("MemoryStore load failed");
 
       if (input.actorConfig.memory?.length) {
         memoryService.initActorMemory(
@@ -421,7 +393,6 @@ export class ActorRuntime {
 
       actorDecisionExecutor.registerRun({ actorRunId, actorId, context, state, pendingExec: null });
       this.runs.set(actorRunId, { skill, state, context, memoryStore });
-
       return await this.executeLoop(actorRunId, actorId, context, state, skill, memoryStore);
     } catch (error) {
       traceLogger.record(actorRunId, "error", { message: error instanceof Error ? error.message : String(error) });
@@ -432,10 +403,16 @@ export class ActorRuntime {
     }
   }
 
-  async continue(
-    actorRunId: string,
-    event: ActorContinueEvent
-  ): Promise<ActorRunOutput> {
+  private endErroredContinue(actorRunId: string, state: SkillState, message: string): ActorRunOutput {
+    traceLogger.record(actorRunId, "error", { message });
+    state.status = "error";
+    traceLogger.endRun(actorRunId, "error");
+    actorDecisionExecutor.removeRun(actorRunId);
+    this.runs.delete(actorRunId);
+    return this.buildOutput(actorRunId, "error", null);
+  }
+
+  async continue(actorRunId: string, event: ActorContinueEvent): Promise<ActorRunOutput> {
     const saved = this.runs.get(actorRunId);
     if (!saved) {
       return { actorRunId, status: "error", result: null, toolCalls: [], approvals: [], memoryCandidates: [],
@@ -449,31 +426,15 @@ export class ActorRuntime {
       if (saved.pendingSkillApproval) {
         const pending = saved.pendingSkillApproval;
         if (pending.approvalRequestId !== event.decision.approvalRequestId) {
-          const message = `Skill approval response id mismatch: ${event.decision.approvalRequestId}`;
-          traceLogger.record(actorRunId, "error", { message });
-          state.status = "error";
-          traceLogger.endRun(actorRunId, "error");
-          actorDecisionExecutor.removeRun(actorRunId);
-          this.runs.delete(actorRunId);
-          return this.buildOutput(actorRunId, "error", null);
+          return this.endErroredContinue(actorRunId, state, `Skill approval response id mismatch: ${event.decision.approvalRequestId}`);
         }
 
-        traceLogger.resumeRun(actorRunId, {
-          resumedBy: "approval_decision",
-          waitingKind: "skill_approval",
-          requestId: pending.approvalRequestId,
-          stepKey: pending.stepKey,
-        });
+        traceLogger.resumeRun(actorRunId, { resumedBy: "approval_decision", waitingKind: "skill_approval", requestId: pending.approvalRequestId, stepKey: pending.stepKey });
         applySkillApprovalDecision(pending, event.decision, state, actorRunId);
         saved.pendingSkillApproval = undefined;
 
         if (!approvalAllowsResume(event.decision)) {
-          state.status = "error";
-          traceLogger.record(actorRunId, "error", { message: `Skill approval did not approve resume: ${event.decision.decision}` });
-          traceLogger.endRun(actorRunId, "error");
-          actorDecisionExecutor.removeRun(actorRunId);
-          this.runs.delete(actorRunId);
-          return this.buildOutput(actorRunId, "error", null);
+          return this.endErroredContinue(actorRunId, state, `Skill approval did not approve resume: ${event.decision.decision}`);
         }
 
         state.status = "running";
@@ -481,11 +442,7 @@ export class ActorRuntime {
         return await this.executeLoop(actorRunId, actorId, context, state, skill, memoryStore);
       }
 
-      traceLogger.resumeRun(actorRunId, {
-        resumedBy: "approval_decision",
-        waitingKind: "tool_approval",
-        requestId: event.decision.approvalRequestId,
-      });
+      traceLogger.resumeRun(actorRunId, { resumedBy: "approval_decision", waitingKind: "tool_approval", requestId: event.decision.approvalRequestId });
       const execResult = await actorDecisionExecutor.continueAfterApproval(actorRunId, event.decision);
       if (execResult.outcome === "error") {
         state.status = "error";
@@ -502,23 +459,11 @@ export class ActorRuntime {
     if (event.type === "human_input_response") {
       const pending = saved.pendingHumanInput;
       if (!pending || pending.humanInputRequestId !== event.response.humanInputRequestId) {
-        const message = pending
-          ? `Human input response id mismatch: ${event.response.humanInputRequestId}`
-          : `No pending human input for ${actorRunId}`;
-        traceLogger.record(actorRunId, "error", { message });
-        state.status = "error";
-        traceLogger.endRun(actorRunId, "error");
-        actorDecisionExecutor.removeRun(actorRunId);
-        this.runs.delete(actorRunId);
-        return this.buildOutput(actorRunId, "error", null);
+        const message = pending ? `Human input response id mismatch: ${event.response.humanInputRequestId}` : `No pending human input for ${actorRunId}`;
+        return this.endErroredContinue(actorRunId, state, message);
       }
 
-      traceLogger.resumeRun(actorRunId, {
-        resumedBy: "human_input_response",
-        waitingKind: "human_input",
-        requestId: pending.humanInputRequestId,
-        stepKey: pending.stepKey,
-      });
+      traceLogger.resumeRun(actorRunId, { resumedBy: "human_input_response", waitingKind: "human_input", requestId: pending.humanInputRequestId, stepKey: pending.stepKey });
       applyHumanInputResponse(pending, event.response, state, actorRunId);
       saved.pendingHumanInput = undefined;
       state.status = "running";
@@ -528,34 +473,24 @@ export class ActorRuntime {
 
     if (event.type === "external_event_received") {
       const pending = saved.pendingExternalEvent;
-      if (!pending || pending.externalEventRequestId !== event.event.externalEventRequestId) {
-        const message = pending
-          ? `External event response id mismatch: ${event.event.externalEventRequestId}`
-          : `No pending external event for ${actorRunId}`;
-        traceLogger.record(actorRunId, "error", { message });
-        state.status = "error";
-        traceLogger.endRun(actorRunId, "error");
-        actorDecisionExecutor.removeRun(actorRunId);
-        this.runs.delete(actorRunId);
-        return this.buildOutput(actorRunId, "error", null);
-      }
-      if (pending.eventName !== event.event.eventName) {
-        const message = `External event name mismatch: expected ${pending.eventName}, received ${event.event.eventName}`;
-        traceLogger.record(actorRunId, "error", { message });
-        state.status = "error";
-        traceLogger.endRun(actorRunId, "error");
-        actorDecisionExecutor.removeRun(actorRunId);
-        this.runs.delete(actorRunId);
-        return this.buildOutput(actorRunId, "error", null);
+      if (!pending) {
+        return this.endErroredContinue(actorRunId, state, `No pending external event for ${actorRunId}`);
       }
 
-      traceLogger.resumeRun(actorRunId, {
-        resumedBy: "external_event_received",
-        waitingKind: "external_event",
-        requestId: pending.externalEventRequestId,
-        stepKey: pending.stepKey,
-        eventName: pending.eventName,
-      });
+      const validation = validateExternalEventReceived(pending, event.event);
+      if (!validation.valid) {
+        traceLogger.record(actorRunId, "external_event_validation_failed", {
+          externalEventRequestId: event.event.externalEventRequestId,
+          stepKey: pending.stepKey,
+          eventName: event.event.eventName,
+          validationErrors: validation.errors,
+          expectedCorrelationKey: pending.correlationKey,
+          receivedCorrelationKey: event.event.correlationKey,
+        });
+        return this.endErroredContinue(actorRunId, state, "External event validation failed: " + validation.errors.join("; "));
+      }
+
+      traceLogger.resumeRun(actorRunId, { resumedBy: "external_event_received", waitingKind: "external_event", requestId: pending.externalEventRequestId, stepKey: pending.stepKey, eventName: pending.eventName });
       applyExternalEventReceived(pending, event.event, state, actorRunId);
       saved.pendingExternalEvent = undefined;
       state.status = "running";
@@ -565,10 +500,6 @@ export class ActorRuntime {
 
     return await this.executeLoop(actorRunId, actorId, context, state, skill, memoryStore);
   }
-
-  // -----------------------------------------------------------------------
-  // 主循环
-  // -----------------------------------------------------------------------
 
   private async executeLoop(
     actorRunId: string, actorId: string,
@@ -593,11 +524,7 @@ export class ActorRuntime {
         const saved = this.runs.get(actorRunId);
         if (saved) saved.pendingHumanInput = request;
         state.status = "waiting_human_input";
-        traceLogger.suspendRun(actorRunId, "waiting_human_input", {
-          waitingKind: "human_input",
-          stepKey: request.stepKey,
-          requestId: request.humanInputRequestId,
-        });
+        traceLogger.suspendRun(actorRunId, "waiting_human_input", { waitingKind: "human_input", stepKey: request.stepKey, requestId: request.humanInputRequestId });
         return this.buildOutput(actorRunId, "waiting_human_input", null, undefined, undefined, request);
       }
 
@@ -606,12 +533,7 @@ export class ActorRuntime {
         const saved = this.runs.get(actorRunId);
         if (saved) saved.pendingSkillApproval = request;
         state.status = "waiting_approval";
-        traceLogger.suspendRun(actorRunId, "waiting_approval", {
-          waitingKind: "skill_approval",
-          stepKey: request.stepKey,
-          requestId: request.approvalRequestId,
-          reason: request.reason,
-        });
+        traceLogger.suspendRun(actorRunId, "waiting_approval", { waitingKind: "skill_approval", stepKey: request.stepKey, requestId: request.approvalRequestId, reason: request.reason });
         return this.buildOutput(actorRunId, "waiting_approval", null, request);
       }
 
@@ -620,13 +542,7 @@ export class ActorRuntime {
         const saved = this.runs.get(actorRunId);
         if (saved) saved.pendingExternalEvent = request;
         state.status = "waiting_external_event";
-        traceLogger.suspendRun(actorRunId, "waiting_external_event", {
-          waitingKind: "external_event",
-          stepKey: request.stepKey,
-          requestId: request.externalEventRequestId,
-          eventName: request.eventName,
-          correlationKey: request.correlationKey,
-        });
+        traceLogger.suspendRun(actorRunId, "waiting_external_event", { waitingKind: "external_event", stepKey: request.stepKey, requestId: request.externalEventRequestId, eventName: request.eventName, correlationKey: request.correlationKey });
         return this.buildOutput(actorRunId, "waiting_external_event", null, undefined, undefined, undefined, request);
       }
 
@@ -639,12 +555,7 @@ export class ActorRuntime {
 
       if (step.type === "llm_judge") {
         const judgeStep = step as LLMJudgeStep;
-        const judgeResult = await actorDecisionEngine.generateJudgeResult({
-          step: judgeStep,
-          context,
-          state,
-          actorRunId,
-        });
+        const judgeResult = await actorDecisionEngine.generateJudgeResult({ step: judgeStep, context, state, actorRunId });
         skillRuntime.executeLLMJudge(judgeStep, state, actorRunId, judgeResult);
       }
 
@@ -656,7 +567,6 @@ export class ActorRuntime {
       }
 
       const decision = actorDecisionEngine.decide(step, context, state, actorRunId, prebuiltRequest);
-
       const execResult = await actorDecisionExecutor.execute(
         decision, context, state, actorRunId, actorId,
         step.type === "tool_call"
@@ -673,12 +583,7 @@ export class ActorRuntime {
         }
         case "waiting_approval": {
           state.status = "waiting_approval";
-          traceLogger.suspendRun(actorRunId, "waiting_approval", {
-            waitingKind: "tool_approval",
-            requestId: execResult.approvalRequest.approvalRequestId,
-            toolName: execResult.approvalRequest.toolName,
-            reason: execResult.approvalRequest.reason,
-          });
+          traceLogger.suspendRun(actorRunId, "waiting_approval", { waitingKind: "tool_approval", requestId: execResult.approvalRequest.approvalRequestId, toolName: execResult.approvalRequest.toolName, reason: execResult.approvalRequest.reason });
           return this.buildOutput(actorRunId, "waiting_approval", null, execResult.approvalRequest);
         }
         case "final_output": {
@@ -710,26 +615,17 @@ export class ActorRuntime {
     const memoryCandidates = memoryGeneration.candidates;
 
     for (const c of memoryCandidates) {
-      traceLogger.record(actorRunId, "memory_candidate_generated", {
-        candidateId: c.candidateId, scope: c.scope, type: c.type, content: c.content,
-      } as Record<string, unknown>);
+      traceLogger.record(actorRunId, "memory_candidate_generated", { candidateId: c.candidateId, scope: c.scope, type: c.type, content: c.content } as Record<string, unknown>);
       const accepted = memoryService.getAllMemories().find((m) => m.sourceRunId === actorRunId && m.content === c.content);
       if (accepted) {
-        traceLogger.record(actorRunId, "memory_accepted", {
-          memoryId: accepted.memoryId,
-          candidateId: c.candidateId,
-          scope: accepted.scope,
-          type: accepted.type,
-        });
+        traceLogger.record(actorRunId, "memory_accepted", { memoryId: accepted.memoryId, candidateId: c.candidateId, scope: accepted.scope, type: accepted.type });
       }
     }
 
     traceLogger.record(actorRunId, "memory_write_summary", memoryGeneration.summary as unknown as Record<string, unknown>);
 
     const memorySaved = await saveRuntimeMemoryStore(actorRunId, memoryStore);
-    if (!memorySaved) {
-      state.status = "error";
-    }
+    if (!memorySaved) state.status = "error";
 
     const endStatus: "completed" | "error" = state.status === "completed" ? "completed" : "error";
     traceLogger.endRun(actorRunId, endStatus);
@@ -740,28 +636,15 @@ export class ActorRuntime {
     return this.buildOutput(actorRunId, endStatus, finalResult, undefined, memoryCandidates);
   }
 
-  private buildPendingApprovalOutput(
-    pendingApproval: ApprovalRequest | SkillApprovalRequest
-  ): PendingApprovalOutput {
+  private buildPendingApprovalOutput(pendingApproval: ApprovalRequest | SkillApprovalRequest): PendingApprovalOutput {
     const maybeSkillApproval = pendingApproval as Partial<SkillApprovalRequest>;
     if (maybeSkillApproval.approvalKind === "skill_step") {
       const skillApproval = pendingApproval as SkillApprovalRequest;
-      return {
-        approvalKind: "skill_step",
-        approvalRequestId: skillApproval.approvalRequestId,
-        stepKey: skillApproval.stepKey,
-        outputKey: skillApproval.outputKey,
-        reason: skillApproval.reason,
-      };
+      return { approvalKind: "skill_step", approvalRequestId: skillApproval.approvalRequestId, stepKey: skillApproval.stepKey, outputKey: skillApproval.outputKey, reason: skillApproval.reason };
     }
 
     const toolApproval = pendingApproval as ApprovalRequest;
-    return {
-      approvalKind: "tool_call",
-      approvalRequestId: toolApproval.approvalRequestId,
-      toolName: toolApproval.toolName,
-      reason: toolApproval.reason,
-    };
+    return { approvalKind: "tool_call", approvalRequestId: toolApproval.approvalRequestId, toolName: toolApproval.toolName, reason: toolApproval.reason };
   }
 
   private buildOutput(
@@ -774,7 +657,6 @@ export class ActorRuntime {
     pendingExternalEvent?: ExternalEventRequest
   ): ActorRunOutput {
     const trace = traceLogger.getTrace(actorRunId)!;
-
     const toolCalls = trace.events
       .filter((e) => e.eventType === "tool_call_start")
       .map((e) => ({
@@ -787,10 +669,7 @@ export class ActorRuntime {
     const approvals = trace.events
       .filter((e) => e.eventType === "approval_requested")
       .map((e) => {
-        const decision = trace.events.find((d) =>
-          d.eventType === "approval_decided" &&
-          d.data.approvalRequestId === e.data.approvalRequestId
-        );
+        const decision = trace.events.find((d) => d.eventType === "approval_decided" && d.data.approvalRequestId === e.data.approvalRequestId);
         return {
           approvalRequestId: String(e.data.approvalRequestId ?? ""),
           toolName: String(e.data.toolName ?? ""),
