@@ -1,6 +1,6 @@
 {
   "name": "@foreverthinking/organize",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "description": "Self-Operating Organization Actor Kernel",
   "private": true,
   "scripts": {
@@ -20,6 +20,7 @@
     "demo:recovery:bundle": "tsx src/examples/runtime-recovery-bundle.demo.ts",
     "demo:recovery:cross-process": "tsx src/examples/cross-process-recovery.demo.ts",
     "demo:external:event": "tsx src/examples/external-event-runtime.demo.ts",
+    "demo:organization": "tsx src/examples/organization-runtime.demo.ts",
     "build": "tsc",
     "start:dist": "node dist/examples/customer-after-sales.demo.js",
     "typecheck": "tsc --noEmit"
