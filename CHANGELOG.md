@@ -8,12 +8,15 @@ README is the project entry point. Version history, verification coverage, and r
 
 ## Current State / 当前状态
 
-Current version: `v0.4.5 — External Event Safety / Validation`
+Current version: `v0.5.0 — Organization Runtime Foundation`
 
-当前版本：`v0.4.5 — External Event Safety / Validation`
+当前版本：`v0.5.0 — Organization Runtime Foundation`
 
 | Boundary / 边界 | Status / 状态 |
 |---|---|
+| Organization Runtime | Organization-scoped ActorRegistry, capability enforcement, immutable Task state, atomic queue claim, and real ActorRuntime run / continue dispatch are available. / 已支持按组织隔离的 ActorRegistry、能力校验、不可变 Task 状态、原子队列 claim，以及真实 ActorRuntime run / continue 调度。 |
+| Actor Messaging | FIFO Actor Inbox uses explicit queued / delivered / acknowledged states and validates both members and capabilities. / FIFO Actor Inbox 使用显式 queued / delivered / acknowledged 状态，并校验消息双方成员与能力。 |
+| Organization Recovery | OrganizationSnapshot persists Registry, Task Queue, Inbox, Organization Trace, PendingRunSnapshot, and organization/run-partitioned Memory / Trace recovery state. / OrganizationSnapshot 可持久化 Registry、Task Queue、Inbox、Organization Trace、PendingRunSnapshot，以及按组织/运行分区的 Memory / Trace 恢复状态。 |
 | Actor Kernel | Single-Actor loop supports ToolCall, tool approval, Skill wait_approval, human input, external event waiting, continue, Trace lifecycle, memory crystallization, store-backed runs, persistent Trace snapshots, persistent pending runs, coordinated recovery bundles, process-boundary recovery validation, and external event safety checks. / 单 Actor 闭环已支持 ToolCall、工具审批、Skill wait_approval、human input、external event waiting、continue、Trace 生命周期、记忆沉淀、Store-backed run、Trace 快照持久化、pending run 持久化、组合恢复包、进程边界恢复验证与外部事件安全校验。 |
 | Waiting / Resume | Human input, Skill approval, ToolCall approval, and external events share explicit suspend / resume lifecycle Trace events. / human input、Skill approval、ToolCall approval 与 external event 已统一使用显式 suspend / resume 生命周期 Trace。 |
 | External Event Safety | External events validate request id, event name, required correlation key, and lightweight payload schema before resume; invalid events preserve the pending run for retry. / 外部事件在 resume 前会校验 request id、event name、必需的 correlation key 与轻量 payload schema；非法事件会保留 pending run 供后续重试。 |
@@ -41,14 +44,47 @@ Current version: `v0.4.5 — External Event Safety / Validation`
 | `npm run demo:recovery:cross-process` | Cross-process Recovery demo, 24 checks / 跨进程恢复 Demo，24 条验收 |
 | `npm run demo:external:event` | External Event Runtime demo, 15 checks / External Event Runtime Demo，15 条验收 |
 | `npm run demo:external:event:validation` | External Event Validation demo, 25 checks / External Event Validation Demo，25 条验收 |
+| `npm run demo:organization` | Organization Runtime demo, 29 checks / Organization Runtime Demo，29 条验收 |
+| `npm run demo:organization:recovery` | Organization Recovery demo, 23 checks / Organization Recovery Demo，23 条验收 |
 
 ---
 
-## Planned: v0.5.0 — Organization Runtime Foundation
+## v0.5.0 — Organization Runtime Foundation
 
-Goal: introduce the first organization layer above ActorRuntime: organization model, actor registry, task delegation, actor messages, and organization trace.
+- Rebuilt v0.5.0 from the merged v0.4.5 main instead of continuing the diverged prototype branch.
+- Added organization-scoped `ActorRegistry`, `TaskManager`, `ActorInbox`, and `OrganizationTrace` state; shared ActorRuntime Memory / Trace services are restored only through organization/run partitions.
+- Registered Actors now retain executable `ActorConfig`, owned `SkillConfig` entries, lifecycle status, and organization capabilities.
+- Enforced organization membership, active status, `allowed_skills`, Skill ownership, managed Actor registration, protected Inbox reads, event-specific continuation authority, and task/message capabilities.
+- Added immutable `TaskManager` state with controlled created → assigned → queued → running → waiting / completed / failed transitions.
+- Added synchronous single-runtime queue claim before ActorRuntime execution so concurrent dispatch cannot run one task twice.
+- `OrganizationRuntime.dispatchNext()` now calls `ActorRuntime.run()` and binds the returned actorRunId to the Organization Task.
+- `OrganizationRuntime.continueTask()` resumes the bound Actor run and maps waiting/completed/error results back to Task state.
+- Added FIFO `ActorInbox` with explicit queued, delivered, and acknowledged states; unacknowledged delivered messages can be redelivered.
+- Added organization-level Trace for permission, task, message, and recovery metadata without storing message/event payloads.
+- Added `OrganizationSnapshot`, `OrganizationStore`, and `JsonOrganizationStore` with serialized in-instance mutations and atomic file replacement. Cross-process writers still require an external lock or single-writer deployment.
+- Organization recovery persists Registry, Tasks, queue order, Inbox, Organization Trace, PendingRunSnapshot entries, filtered Actor Trace, and organization-scoped Memory.
+- Added organization-partitioned Memory dump/restore and run-partitioned Trace dump/restore so restoring one organization preserves others.
+- ActorRuntime now uses UUID run IDs, preventing process-local counters from colliding during organization recovery.
+- Recovery performs complete Registry, Queue, Inbox, Organization Trace, Task/PendingRun/Actor Trace, and Memory partition preflight before mutating shared runtime state, with rollback on commit failure.
+- Added `demo:organization` with 29 checks covering isolation, managed permissions, independent approval, pending-safe event routing, JSON-safe messages, dispatch input/identity binding, continuation, immutable state, queue claim, protected Inbox reads, and FIFO messaging.
+- Added `demo:organization:recovery` with 23 checks covering true cold restore, pending-run continuation, queue/inbox restore, malformed snapshot rejection, serialized concurrent saves, and preservation/continuation of another organization's pending run.
+- Added both Organization demos to CI and synchronized package / lockfile metadata to v0.5.0.
 
-目标：在 ActorRuntime 之上引入第一层组织运行时：组织模型、Actor Registry、任务委派、Actor Message 与 Organization Trace。
+中文：
+
+- 从已合并 v0.4.5 的 main 重建 v0.5.0，不再延续已分叉的原型分支。
+- ActorRegistry、TaskManager、ActorInbox 与 OrganizationTrace 按 organizationId 隔离；共享的 ActorRuntime Memory / Trace 服务仅按组织/运行分区恢复。
+- Actor 注册保存可执行 ActorConfig、SkillConfig、状态与组织能力，并强制校验成员、active、allowed_skills、Skill owner、manager 注册、Inbox 读取与 continuation 权限边界。
+- Task 使用不可变受控状态机和同步队列 claim，避免并发 dispatch 重复执行。
+- OrganizationRuntime 真实调用 ActorRuntime.run / continue，并保存 Task ↔ actorRunId 绑定。
+- Actor Inbox 使用 queued / delivered / acknowledged FIFO 语义，未 ack 的 delivered message 可重新投递。
+- Organization Trace 记录权限、任务、消息与恢复 metadata，不记录完整 payload。
+- 新增 OrganizationSnapshot、OrganizationStore 与单实例写入串行化、原子文件替换的 JsonOrganizationStore；跨进程并发写仍需外部锁或单写者部署。
+- 恢复包保存 Registry、Task Queue、Inbox、Organization Trace、PendingRunSnapshot，并按 organizationId / actorRunId 分区恢复 Memory 与 Actor Trace。
+- ActorRuntime 改用 UUID run ID，避免跨进程恢复时的计数器碰撞。
+- 恢复会预校验 Registry、Queue、Inbox、Organization Trace、Task/PendingRun/Actor Trace 与 Memory 分区，并在提交失败时回滚。
+- 新增 Organization Runtime 29 条验收与 Organization Recovery 23 条验收，并接入 CI。
+- package.json 与 package-lock.json 对齐到 v0.5.0。
 
 ---
 
