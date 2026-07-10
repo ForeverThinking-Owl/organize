@@ -487,7 +487,8 @@ export class ActorRuntime {
           expectedCorrelationKey: pending.correlationKey,
           receivedCorrelationKey: event.event.correlationKey,
         });
-        return this.endErroredContinue(actorRunId, state, "External event validation failed: " + validation.errors.join("; "));
+        state.status = "waiting_external_event";
+        return this.buildOutput(actorRunId, "waiting_external_event", null);
       }
 
       traceLogger.resumeRun(actorRunId, { resumedBy: "external_event_received", waitingKind: "external_event", requestId: pending.externalEventRequestId, stepKey: pending.stepKey, eventName: pending.eventName });
