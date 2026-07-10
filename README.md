@@ -34,7 +34,7 @@ Runtime Recovery Bundle：PendingRun + Trace + Memory 可组合保存与恢复
 v0.4.5 — External Event Safety / Validation
 ```
 
-当前版本加固 `wait_external_event` 边界：外部事件在 resume 前会校验 request id、event name、correlation key（当事件提供 correlation key 时）和轻量 JSON schema。校验失败会记录 `external_event_validation_failed` 并以 `error` 结束，不会产生 `actor_run_resumed` 或 `external_event_received`。成功事件的完整 payload 只写入 `steps` / `outputs`，Trace 只记录 metadata 与 payload summary。
+当前版本加固 `wait_external_event` 边界：外部事件在 resume 前会校验 request id、event name、必需的 correlation key 和轻量 JSON schema。校验失败会记录 `external_event_validation_failed`，保持 run 为 `waiting_external_event` 并保留原 pending request，不会产生 `actor_run_resumed`、`external_event_received` 或终止事件，因此后续合法事件仍可重试。成功事件的完整 payload 只写入 `steps` / `outputs`，Trace 只记录 metadata 与 payload summary。
 
 版本历史、验收矩阵、CI 覆盖和下一步计划见 [CHANGELOG.md](./CHANGELOG.md)。
 
@@ -154,7 +154,7 @@ MemorySnapshot → TraceSnapshot → PendingRunSnapshot
 v0.4.5 — External Event Safety / Validation
 ```
 
-This version hardens `wait_external_event` with request id, event name, correlation-key, and lightweight payload schema validation before resume. Failed events record `external_event_validation_failed` and end with `error` without producing `actor_run_resumed`.
+This version hardens `wait_external_event` with request id, event name, required correlation-key, and lightweight payload schema validation before resume. Invalid events record `external_event_validation_failed` while preserving the original `waiting_external_event` run, so a later valid event can retry the same pending request without producing a false resume or terminal event.
 
 ## Verification Scripts
 
