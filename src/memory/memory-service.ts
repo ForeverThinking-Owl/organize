@@ -217,6 +217,52 @@ export class MemoryService {
     this.restoreCounters();
   }
 
+  /**
+   * Export only the memory owned by one organization.
+   *
+   * Organization recovery must not serialize or later overwrite memories from
+   * unrelated organizations that happen to share the same process.
+   */
+  dumpOrganizationSnapshot(organizationId: string): MemorySnapshot {
+    return {
+      schemaVersion: MEMORY_SNAPSHOT_SCHEMA_VERSION,
+      savedAt: new Date().toISOString(),
+      memories: cloneJson(this.memories.filter((memory) => memory.organizationId === organizationId)),
+      candidates: cloneJson(this.candidates.filter((candidate) => candidate.organizationId === organizationId)),
+      lastWriteSummary: null,
+    };
+  }
+
+  /**
+   * Replace one organization's memory partition while preserving every other
+   * organization already loaded in the shared MemoryService.
+   */
+  restoreOrganizationSnapshot(organizationId: string, snapshot: MemorySnapshot): void {
+    if (snapshot.schemaVersion !== MEMORY_SNAPSHOT_SCHEMA_VERSION) {
+      throw new Error("Unsupported MemorySnapshot schemaVersion: " + String(snapshot.schemaVersion));
+    }
+    if (snapshot.memories.some((memory) => memory.organizationId !== organizationId)) {
+      throw new Error(`MemorySnapshot contains memory outside organization ${organizationId}`);
+    }
+    if (snapshot.candidates.some((candidate) => candidate.organizationId !== organizationId)) {
+      throw new Error(`MemorySnapshot contains candidate outside organization ${organizationId}`);
+    }
+
+    const otherMemories = this.memories.filter((memory) => memory.organizationId !== organizationId);
+    const otherCandidates = this.candidates.filter((candidate) => candidate.organizationId !== organizationId);
+    this.memories = [...otherMemories, ...cloneJson(snapshot.memories)];
+    this.candidates = [...otherCandidates, ...cloneJson(snapshot.candidates)];
+    this.rebuildFingerprints();
+    this.restoreCounters();
+  }
+
+  clearOrganization(organizationId: string): void {
+    this.memories = this.memories.filter((memory) => memory.organizationId !== organizationId);
+    this.candidates = this.candidates.filter((candidate) => candidate.organizationId !== organizationId);
+    this.rebuildFingerprints();
+    this.restoreCounters();
+  }
+
   getOrganizationPublic(organizationId: string): string[] {
     return this.memories
       .filter((m) => m.organizationId === organizationId && m.scope === "organization_public" && m.status === "active")

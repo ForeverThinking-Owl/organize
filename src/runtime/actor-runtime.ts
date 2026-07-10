@@ -3,6 +3,7 @@
 // v0.4.5: wait_external_event validates payload / correlation before resume
 // ============================================================================
 
+import { randomUUID } from "node:crypto";
 import { ActorConfig } from "../core/types/actor";
 import {
   Skill,
@@ -114,8 +115,6 @@ export type ActorContinueEvent =
   | { type: "approval_decision"; decision: ApprovalDecision }
   | { type: "human_input_response"; response: HumanInputResponse }
   | { type: "external_event_received"; event: ExternalEventReceived };
-
-let runCounter = 0;
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -354,7 +353,7 @@ export class ActorRuntime {
   }
 
   async run(input: ActorRunInput): Promise<ActorRunOutput> {
-    const actorRunId = `arun_${++runCounter}`;
+    const actorRunId = `arun_${randomUUID()}`;
     const actorId = input.actorConfig.actor_id;
     const memoryStore = input.runtimeOptions?.memoryStore;
     traceLogger.startRun(actorRunId, actorId, input.skillConfig.skill_id);

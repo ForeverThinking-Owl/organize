@@ -113,6 +113,15 @@ export class TraceLogger {
     };
   }
 
+  dumpRunsSnapshot(actorRunIds: Iterable<string>): TraceSnapshot {
+    const ids = new Set(actorRunIds);
+    return {
+      schemaVersion: TRACE_SNAPSHOT_SCHEMA_VERSION,
+      savedAt: new Date().toISOString(),
+      traces: cloneJson(this.getAllTraces().filter((trace) => ids.has(trace.actorRunId))),
+    };
+  }
+
   restoreSnapshot(snapshot: TraceSnapshot): void {
     if (snapshot.schemaVersion !== TRACE_SNAPSHOT_SCHEMA_VERSION) {
       throw new Error("Unsupported TraceSnapshot schemaVersion: " + String(snapshot.schemaVersion));
@@ -121,6 +130,25 @@ export class TraceLogger {
     const traces = cloneJson(snapshot.traces);
     this.traces = new Map(traces.map((trace) => [trace.actorRunId, trace]));
     traceCounter = maxCounterFromEventIds(traces);
+  }
+
+  /** Upsert selected run traces without replacing unrelated process state. */
+  restoreRunsSnapshot(snapshot: TraceSnapshot): void {
+    if (snapshot.schemaVersion !== TRACE_SNAPSHOT_SCHEMA_VERSION) {
+      throw new Error("Unsupported TraceSnapshot schemaVersion: " + String(snapshot.schemaVersion));
+    }
+
+    for (const trace of cloneJson(snapshot.traces)) {
+      this.traces.set(trace.actorRunId, trace);
+    }
+    traceCounter = maxCounterFromEventIds(this.getAllTraces());
+  }
+
+  clearRuns(actorRunIds: Iterable<string>): void {
+    for (const actorRunId of actorRunIds) {
+      this.traces.delete(actorRunId);
+    }
+    traceCounter = maxCounterFromEventIds(this.getAllTraces());
   }
 
   clear(): void {
