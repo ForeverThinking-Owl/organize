@@ -71,7 +71,14 @@ export function validateExternalEventCorrelation(
   request: ExternalEventRequest,
   event: ExternalEventReceived
 ): ExternalEventValidationResult {
-  if (!request.correlationKey || !event.correlationKey) return { valid: true, errors: [] };
+  if (request.correlationKey === undefined) return { valid: true, errors: [] };
+
+  if (event.correlationKey === undefined) {
+    return {
+      valid: false,
+      errors: [`correlationKey is required: expected ${request.correlationKey}`],
+    };
+  }
 
   if (request.correlationKey !== event.correlationKey) {
     return {
