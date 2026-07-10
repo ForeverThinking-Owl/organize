@@ -70,3 +70,6 @@ jobs:
 
       - name: External Event Runtime Demo
         run: npm run demo:external:event
+
+      - name: External Event Validation Demo
+        run: npm run demo:external:event:validation

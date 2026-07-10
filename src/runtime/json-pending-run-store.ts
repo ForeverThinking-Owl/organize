@@ -1,6 +1,6 @@
 // ============================================================================
 // JsonPendingRunStore
-// v0.4.4: PendingRunStore implementation validates external event waits
+// v0.4.5: PendingRunStore implementation validates external event waits
 // ============================================================================
 
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -27,9 +27,30 @@ function assertStringField(value: Record<string, unknown>, key: string, label: s
   }
 }
 
+function assertOptionalStringField(value: Record<string, unknown>, key: string, label: string): void {
+  if (value[key] !== undefined && typeof value[key] !== "string") {
+    throw new Error(`Invalid ${label}: ${key} must be a string when present`);
+  }
+}
+
 function assertObjectField(value: Record<string, unknown>, key: string, label: string): void {
   if (!isObject(value[key])) {
     throw new Error(`Invalid ${label}: ${key} must be an object`);
+  }
+}
+
+function assertExternalEventRequest(value: unknown): void {
+  if (!isObject(value)) {
+    throw new Error("Invalid PendingRunSnapshot: pendingExternalEvent must be an object");
+  }
+  assertStringField(value, "externalEventRequestId", "pendingExternalEvent");
+  assertStringField(value, "stepKey", "pendingExternalEvent");
+  assertStringField(value, "eventName", "pendingExternalEvent");
+  assertStringField(value, "outputKey", "pendingExternalEvent");
+  assertOptionalStringField(value, "correlationKey", "pendingExternalEvent");
+  assertOptionalStringField(value, "reason", "pendingExternalEvent");
+  if (value.eventSchema !== undefined && !isObject(value.eventSchema)) {
+    throw new Error("Invalid pendingExternalEvent: eventSchema must be an object when present");
   }
 }
 
@@ -70,7 +91,10 @@ export function assertPendingRunSnapshot(value: unknown): asserts value is Pendi
     assertObjectField(toolApproval, "pendingExec", "PendingToolApprovalSnapshot");
   }
   if (value.pendingKind === "external_event") {
-    assertObjectField(value, "pendingExternalEvent", "PendingRunSnapshot");
+    if (value.status !== "waiting_external_event") {
+      throw new Error("Invalid PendingRunSnapshot: external_event must use waiting_external_event status");
+    }
+    assertExternalEventRequest(value.pendingExternalEvent);
   }
 }
 

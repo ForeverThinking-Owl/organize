@@ -314,6 +314,7 @@ function continuePayloadForBundle(bundle: RuntimeRecoveryBundle) {
         event: {
           externalEventRequestId: pending.externalEventRequestId,
           eventName: pending.eventName,
+          correlationKey: pending.correlationKey,
           payload: {
             payment_id: "PAY_10086",
             status: "confirmed",

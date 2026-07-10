@@ -1,11 +1,12 @@
 // ============================================================================
 // ExternalEventRuntime
-// v0.4.4: runtime helpers for wait_external_event waiting / continue semantics
+// v0.4.5: runtime helpers for wait_external_event waiting / continue semantics
 // ============================================================================
 
 import type { WaitExternalEventStep } from "../core/types/skill";
 import { traceLogger } from "../trace/trace-logger";
 import { resolveTemplateValue, type SkillState } from "./skill-runtime";
+import { summarizePayload } from "./external-event-validation";
 
 export interface ExternalEventRequest {
   externalEventRequestId: string;
@@ -14,11 +15,13 @@ export interface ExternalEventRequest {
   correlationKey?: string;
   reason?: string;
   outputKey: string;
+  eventSchema?: Record<string, unknown>;
 }
 
 export interface ExternalEventReceived {
   externalEventRequestId: string;
   eventName: string;
+  correlationKey?: string;
   payload: unknown;
   receivedBy?: string;
   receivedAt?: string;
@@ -52,6 +55,7 @@ export function buildExternalEventRequest(
     correlationKey: optionalResolvedString(step.correlationKey, state),
     reason: step.reason,
     outputKey: step.outputKey,
+    eventSchema: step.eventSchema,
   };
 
   traceLogger.record(actorRunId, "skill_step_start", {
@@ -91,6 +95,7 @@ export function applyExternalEventReceived(
     correlationKey: request.correlationKey,
     receivedBy: event.receivedBy,
     receivedAt: record.receivedAt,
+    payloadSummary: summarizePayload(event.payload),
   });
 
   traceLogger.record(actorRunId, "skill_step_end", {

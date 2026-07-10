@@ -1,6 +1,6 @@
 // ============================================================================
 // RuntimeRecoveryBundle
-// v0.4.4: coordinated recovery package supports external event waits
+// v0.4.5: coordinated recovery package validates external event waits
 // ============================================================================
 
 import { memoryService } from "../memory/memory-service";
@@ -81,6 +81,17 @@ export function assertRuntimeRecoveryBundle(value: unknown): asserts value is Ru
   if (pendingRun.pendingKind !== bundle.pendingKind) {
     throw new Error("Invalid RuntimeRecoveryBundle: pendingRun.pendingKind mismatch");
   }
+  if (pendingRun.status !== bundle.status) {
+    throw new Error("Invalid RuntimeRecoveryBundle: pendingRun.status mismatch");
+  }
+  if (bundle.pendingKind === "external_event") {
+    if (bundle.status !== "waiting_external_event") {
+      throw new Error("Invalid RuntimeRecoveryBundle: external_event must use waiting_external_event status");
+    }
+    if (pendingRun.pendingExternalEvent === undefined || pendingRun.pendingExternalEvent === null || typeof pendingRun.pendingExternalEvent !== "object") {
+      throw new Error("Invalid RuntimeRecoveryBundle: external_event requires pendingExternalEvent");
+    }
+  }
 
   const trace = bundle.trace as TraceSnapshot;
   if (!trace.traces?.some((runTrace) => runTrace.actorRunId === bundle.actorRunId)) {
@@ -88,12 +99,6 @@ export function assertRuntimeRecoveryBundle(value: unknown): asserts value is Ru
   }
 }
 
-/**
- * Create a coordinated recovery bundle for one suspended run.
- *
- * The bundle intentionally keeps PendingRunSnapshot, TraceSnapshot, and
- * MemorySnapshot as separate sections so their boundaries stay replaceable.
- */
 export function createRuntimeRecoveryBundle(actorRunId: string): RuntimeRecoveryBundle | null {
   const pendingRun = actorRuntime.dumpPendingRun(actorRunId);
   if (!pendingRun) return null;
@@ -125,14 +130,6 @@ export function createRuntimeRecoveryBundle(actorRunId: string): RuntimeRecovery
   return cloneJson(bundle);
 }
 
-/**
- * Restore a coordinated recovery bundle.
- *
- * Restore order is deliberate:
- * 1. Memory: continue can retrieve / dedupe / write memory consistently.
- * 2. Trace: continue appends resumed / end events to the restored trace.
- * 3. PendingRun: ActorRuntime can accept the continue event.
- */
 export function restoreRuntimeRecoveryBundle(bundle: RuntimeRecoveryBundle): void {
   assertRuntimeRecoveryBundle(bundle);
   const restored = cloneJson(bundle);

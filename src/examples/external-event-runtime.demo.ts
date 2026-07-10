@@ -164,6 +164,7 @@ async function continueWithPaymentEvent(waiting: ActorRunOutput): Promise<ActorR
     event: {
       externalEventRequestId: externalEventRequestId(waiting),
       eventName: "payment.confirmed",
+      correlationKey: waiting.pendingExternalEvent?.correlationKey,
       payload: {
         payment_id: "PAY_10086",
         status: "confirmed",
