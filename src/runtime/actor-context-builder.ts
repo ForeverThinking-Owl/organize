@@ -8,6 +8,7 @@ import { ActorContext, ActorConfig, ToolForActor } from "../core/types/actor";
 import { memoryService } from "../memory/memory-service";
 import { toolGateway } from "../tools/tool-gateway";
 import { traceLogger } from "../trace/trace-logger";
+import { assertActorConfig } from "./actor-config-validation";
 
 function preview(content: string, length = 48): string {
   return content.length > length ? content.slice(0, length) + "..." : content;
@@ -16,7 +17,7 @@ function preview(content: string, length = 48): string {
 /**
  * 从 JSON 配置构建 ActorProfile
  */
-function buildActorProfile(config: ActorConfig): ActorContext["actor"] {
+export function buildActorProfile(config: ActorConfig): ActorContext["actor"] {
   return {
     actorId: config.actor_id,
     organizationId: config.organization_id ?? "org_default",
@@ -33,7 +34,7 @@ function buildActorProfile(config: ActorConfig): ActorContext["actor"] {
 /**
  * 构建 ToolForActor 列表（只包含 allowed 且不在 denied 中的工具）
  */
-function buildAvailableTools(
+export function buildAvailableTools(
   allowedTools: string[],
   deniedTools: string[]
 ): ToolForActor[] {
@@ -52,6 +53,28 @@ function buildAvailableTools(
     }));
 }
 
+export function buildActorPermissions(config: ActorConfig): ActorContext["permissions"] {
+  return {
+    allowedTools: [...config.permissions.allowed_tools],
+    deniedTools: [...config.permissions.denied_tools],
+    allowedSkills: [...(config.permissions.allowed_skills ?? [])],
+    deniedFields: config.permissions.denied_fields
+      ? [...config.permissions.denied_fields]
+      : undefined,
+  };
+}
+
+export function buildActorApprovalJudgment(
+  config: ActorConfig
+): ActorContext["approvalJudgment"] {
+  return {
+    mustRequestApprovalWhen: [...config.approval_judgment.must_request_approval_when],
+    canApprove: config.approval_judgment.can_approve
+      ? structuredClone(config.approval_judgment.can_approve)
+      : undefined,
+  };
+}
+
 export class ActorContextBuilder {
   /**
    * 构建完整的 ActorContext
@@ -65,6 +88,7 @@ export class ActorContextBuilder {
     runtimeContext: Record<string, unknown> = {},
     actorRunId?: string
   ): ActorContext {
+    assertActorConfig(config);
     const actor = buildActorProfile(config);
     const retrieval = memoryService.retrieve({
       organizationId: actor.organizationId,
@@ -96,17 +120,8 @@ export class ActorContextBuilder {
       input,
       runtimeContext,
       memory: retrieval.view,
-      permissions: {
-        allowedTools: config.permissions.allowed_tools,
-        deniedTools: config.permissions.denied_tools,
-        allowedSkills: config.permissions.allowed_skills ?? [],
-        deniedFields: config.permissions.denied_fields,
-      },
-      approvalJudgment: {
-        mustRequestApprovalWhen:
-          config.approval_judgment.must_request_approval_when,
-        canApprove: config.approval_judgment.can_approve,
-      },
+      permissions: buildActorPermissions(config),
+      approvalJudgment: buildActorApprovalJudgment(config),
       availableTools: buildAvailableTools(
         config.permissions.allowed_tools,
         config.permissions.denied_tools

@@ -66,6 +66,33 @@ const REVIEW_SKILL: SkillConfig = {
   ],
 };
 
+const MULTI_REVIEW_SKILL: SkillConfig = {
+  skill_id: "wait_for_two_reviews",
+  name: "Wait For Two Reviews",
+  steps: [
+    {
+      step_key: "first_review",
+      type: "human_input",
+      prompt: "Please provide the first review.",
+      output_key: "first_review",
+    },
+    {
+      step_key: "second_review",
+      type: "human_input",
+      prompt: "Please provide the second review.",
+      output_key: "second_review",
+    },
+    {
+      step_key: "return",
+      type: "return",
+      output_mapping: {
+        first_review: "{{outputs.first_review}}",
+        second_review: "{{outputs.second_review}}",
+      },
+    },
+  ],
+};
+
 const APPROVAL_SKILL: SkillConfig = {
   skill_id: "wait_for_approval",
   name: "Wait For Independent Approval",
@@ -138,8 +165,8 @@ async function main(): Promise<void> {
     capabilities: ALL_CAPABILITIES,
   });
   runtime.registerActor(orgA.organizationId, {
-    actorConfig: actorConfig(orgA.organizationId, "shared_actor", ["complete_task", "wait_for_review", "wait_for_approval"]),
-    skills: [COMPLETE_SKILL, REVIEW_SKILL, APPROVAL_SKILL],
+    actorConfig: actorConfig(orgA.organizationId, "shared_actor", ["complete_task", "wait_for_review", "wait_for_two_reviews", "wait_for_approval"]),
+    skills: [COMPLETE_SKILL, REVIEW_SKILL, MULTI_REVIEW_SKILL, APPROVAL_SKILL],
     capabilities: ALL_CAPABILITIES,
   }, "manager");
   runtime.registerActor(orgA.organizationId, {
@@ -240,6 +267,24 @@ async function main(): Promise<void> {
     mismatchedContinueRejected = error instanceof OrganizationError && error.code === "invalid_input";
   }
   const pendingAfterMismatchedContinue = actorRuntime.dumpPendingRun(waiting.output.actorRunId);
+  const resumedBeforeWrongId = runtime.getTrace(orgA.organizationId)
+    .filter((event) => event.eventType === "task_resumed").length;
+  const wrongIdContinuation = await runtime.continueTask({
+    organizationId: orgA.organizationId,
+    requestedByActorId: "shared_actor",
+    taskId: waitingTask.taskId,
+    event: {
+      type: "human_input_response",
+      response: {
+        humanInputRequestId: "wrong_human_input_request",
+        value: "must-not-be-consumed",
+        respondedBy: "shared_actor",
+      },
+    },
+  });
+  const pendingAfterWrongId = actorRuntime.dumpPendingRun(waiting.output.actorRunId);
+  const resumedAfterWrongId = runtime.getTrace(orgA.organizationId)
+    .filter((event) => event.eventType === "task_resumed").length;
   const continued = await runtime.continueTask({
     organizationId: orgA.organizationId,
     requestedByActorId: "shared_actor",
@@ -249,6 +294,75 @@ async function main(): Promise<void> {
       response: {
         humanInputRequestId: waiting.output.pendingHumanInput.humanInputRequestId,
         value: "approved",
+        respondedBy: "shared_actor",
+      },
+    },
+  });
+
+  const multiReviewTask = runtime.createTask({
+    organizationId: orgA.organizationId,
+    requestedByActorId: "manager",
+    title: "Two-stage review",
+    input: { text: "review twice" },
+  });
+  runtime.assignTask({
+    organizationId: orgA.organizationId,
+    requestedByActorId: "manager",
+    taskId: multiReviewTask.taskId,
+    actorId: "shared_actor",
+    skillId: "wait_for_two_reviews",
+  });
+  runtime.enqueueTask({
+    organizationId: orgA.organizationId,
+    requestedByActorId: "manager",
+    taskId: multiReviewTask.taskId,
+  });
+  const firstMultiWaiting = await runtime.dispatchNext({ organizationId: orgA.organizationId });
+  if (!firstMultiWaiting?.output.pendingHumanInput) {
+    throw new Error("Expected first multi-review human input");
+  }
+  const secondMultiWaiting = await runtime.continueTask({
+    organizationId: orgA.organizationId,
+    requestedByActorId: "shared_actor",
+    taskId: multiReviewTask.taskId,
+    event: {
+      type: "human_input_response",
+      response: {
+        humanInputRequestId: firstMultiWaiting.output.pendingHumanInput.humanInputRequestId,
+        value: "first-ok",
+        respondedBy: "shared_actor",
+      },
+    },
+  });
+  if (!secondMultiWaiting.output.pendingHumanInput) {
+    throw new Error("Expected second multi-review human input");
+  }
+  const multiResumeCountBeforeInvalid = runtime.getTrace(orgA.organizationId)
+    .filter((event) => event.eventType === "task_resumed").length;
+  const invalidSecondMultiReview = await runtime.continueTask({
+    organizationId: orgA.organizationId,
+    requestedByActorId: "shared_actor",
+    taskId: multiReviewTask.taskId,
+    event: {
+      type: "human_input_response",
+      response: {
+        humanInputRequestId: "wrong_second_review_request",
+        value: "must-not-resume",
+        respondedBy: "shared_actor",
+      },
+    },
+  });
+  const multiResumeCountAfterInvalid = runtime.getTrace(orgA.organizationId)
+    .filter((event) => event.eventType === "task_resumed").length;
+  const completedMultiReview = await runtime.continueTask({
+    organizationId: orgA.organizationId,
+    requestedByActorId: "shared_actor",
+    taskId: multiReviewTask.taskId,
+    event: {
+      type: "human_input_response",
+      response: {
+        humanInputRequestId: secondMultiWaiting.output.pendingHumanInput.humanInputRequestId,
+        value: "second-ok",
         respondedBy: "shared_actor",
       },
     },
@@ -383,8 +497,31 @@ async function main(): Promise<void> {
         pendingAfterMismatchedContinue?.status === "waiting_human_input",
       detail: `${mismatchedContinueRejected}/${pendingAfterMismatchedContinue?.status ?? "missing"}`,
     },
+    {
+      label: "wrong continuation request id preserves Organization task",
+      pass:
+        wrongIdContinuation.task.status === "waiting_human_input" &&
+        pendingAfterWrongId?.pendingHumanInput?.humanInputRequestId ===
+          waiting.output.pendingHumanInput.humanInputRequestId &&
+        resumedAfterWrongId === resumedBeforeWrongId,
+      detail: `${wrongIdContinuation.task.status}/${pendingAfterWrongId?.status ?? "missing"}`,
+    },
     { label: "continueTask reuses ActorRuntime run", pass: continued.output.actorRunId === waiting?.output.actorRunId, detail: continued.output.actorRunId },
     { label: "continued task completes", pass: continued.task.status === "completed" && continued.output.result?.review === "approved", detail: JSON.stringify(continued.output.result) },
+    {
+      label: "a valid first continuation can suspend at a second wait",
+      pass: secondMultiWaiting.task.status === "waiting_human_input",
+      detail: secondMultiWaiting.task.status,
+    },
+    {
+      label: "invalid second continuation does not reuse a historical resume event",
+      pass:
+        invalidSecondMultiReview.task.status === "waiting_human_input" &&
+        multiResumeCountAfterInvalid === multiResumeCountBeforeInvalid &&
+        completedMultiReview.task.status === "completed" &&
+        completedMultiReview.output.result?.second_review === "second-ok",
+      detail: `${invalidSecondMultiReview.task.status}/${multiResumeCountBeforeInvalid}->${multiResumeCountAfterInvalid}/${completedMultiReview.task.status}`,
+    },
     {
       label: "task executor cannot self-approve",
       pass: selfApprovalDenied,

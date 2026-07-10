@@ -48,9 +48,57 @@ const WAITING = new Set<OrganizationTaskStatus>([
   "waiting_human_input",
   "waiting_external_event",
 ]);
+const TASK_STATUSES = new Set<OrganizationTaskStatus>([
+  "created", "assigned", "queued", "running", "waiting_approval",
+  "waiting_human_input", "waiting_external_event", "completed", "failed", "cancelled",
+]);
 
 function clone<T>(value: T): T {
   return structuredClone(value);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function assertCreateTaskInput(input: CreateTaskInput): void {
+  if (!isPlainRecord(input)) {
+    throw new OrganizationError("invalid_input", "task must be a plain object");
+  }
+  const allowedFields = new Set(["title", "description", "createdBy", "input", "runtimeContext"]);
+  if (Object.keys(input).some((field) => !allowedFields.has(field))) {
+    throw new OrganizationError("invalid_input", "task has unsupported fields");
+  }
+  if (typeof input.title !== "string" || input.title.length === 0) {
+    throw new OrganizationError("invalid_input", "task.title must be a non-empty string");
+  }
+  if (input.description !== undefined && typeof input.description !== "string") {
+    throw new OrganizationError("invalid_input", "task.description must be a string");
+  }
+  if (typeof input.createdBy !== "string" || input.createdBy.length === 0) {
+    throw new OrganizationError("invalid_input", "task.createdBy must be a non-empty string");
+  }
+  if (!isPlainRecord(input.input)) {
+    throw new OrganizationError("invalid_input", "task.input must be a plain object");
+  }
+  if (Object.keys(input.input).some((field) => field !== "text" && field !== "payload")) {
+    throw new OrganizationError("invalid_input", "task.input has unsupported fields");
+  }
+  if (input.input.text !== undefined && typeof input.input.text !== "string") {
+    throw new OrganizationError("invalid_input", "task.input.text must be a string");
+  }
+  if (input.input.payload !== undefined && !isPlainRecord(input.input.payload)) {
+    throw new OrganizationError("invalid_input", "task.input.payload must be a plain object");
+  }
+  if (input.runtimeContext !== undefined && !isPlainRecord(input.runtimeContext)) {
+    throw new OrganizationError("invalid_input", "task.runtimeContext must be a plain object");
+  }
+  assertJsonSafe(input.input, "task.input");
+  if (input.runtimeContext !== undefined) {
+    assertJsonSafe(input.runtimeContext, "task.runtimeContext");
+  }
 }
 
 export class TaskManager {
@@ -72,8 +120,7 @@ export class TaskManager {
   }
 
   create(input: CreateTaskInput): OrganizationTask {
-    assertJsonSafe(input.input, "task.input");
-    assertJsonSafe(input.runtimeContext ?? {}, "task.runtimeContext");
+    assertCreateTaskInput(input);
     const now = new Date().toISOString();
     const task: OrganizationTask = {
       organizationId: this.organizationId,
@@ -148,6 +195,7 @@ export class TaskManager {
     if (task.status !== "running") {
       throw new OrganizationError("invalid_state", `Task ${taskId} cannot complete from ${task.status}`);
     }
+    assertJsonSafe(result, "task.result");
     return this.replace(task, { status: "completed", actorRunId, result: clone(result) });
   }
 
@@ -188,6 +236,9 @@ export class TaskManager {
       }
       if (this.tasks.has(task.taskId)) {
         throw new OrganizationError("invalid_input", `Duplicate task ${task.taskId} in snapshot`);
+      }
+      if (!TASK_STATUSES.has(task.status)) {
+        throw new OrganizationError("invalid_input", `Task ${task.taskId} has invalid status`);
       }
       this.tasks.set(task.taskId, clone(task));
     }

@@ -7,8 +7,8 @@ import type { Organization } from "./organization";
 import type { OrganizationTask } from "./task";
 import type { OrganizationTraceEvent } from "./organization-trace";
 
-export const ORGANIZATION_SNAPSHOT_SCHEMA_VERSION = "organization.snapshot.v1" as const;
-export const ORGANIZATION_STORE_SCHEMA_VERSION = "organization.store.v1" as const;
+export const ORGANIZATION_SNAPSHOT_SCHEMA_VERSION = "organization.snapshot.v2" as const;
+export const ORGANIZATION_STORE_SCHEMA_VERSION = "organization.store.v2" as const;
 
 export interface OrganizationRuntimeRecoverySnapshot {
   pendingRuns: PendingRunSnapshot[];
@@ -43,6 +43,9 @@ export function assertOrganizationSnapshot(value: unknown): asserts value is Org
   if (!isRecord(value) || value.schemaVersion !== ORGANIZATION_SNAPSHOT_SCHEMA_VERSION) {
     throw new Error("Invalid OrganizationSnapshot schemaVersion");
   }
+  if (typeof value.savedAt !== "string" || value.savedAt.length === 0) {
+    throw new Error("Invalid OrganizationSnapshot savedAt");
+  }
   if (!isRecord(value.organization) || typeof value.organization.organizationId !== "string") {
     throw new Error("Invalid OrganizationSnapshot organization");
   }
@@ -68,8 +71,19 @@ export function assertOrganizationStoreSnapshot(value: unknown): asserts value i
   if (!isRecord(value) || value.schemaVersion !== ORGANIZATION_STORE_SCHEMA_VERSION) {
     throw new Error("Invalid OrganizationStoreSnapshot schemaVersion");
   }
+  if (typeof value.savedAt !== "string" || value.savedAt.length === 0) {
+    throw new Error("Invalid OrganizationStoreSnapshot savedAt");
+  }
   if (!Array.isArray(value.organizations)) {
     throw new Error("Invalid OrganizationStoreSnapshot organizations");
   }
-  value.organizations.forEach(assertOrganizationSnapshot);
+  const organizationIds = new Set<string>();
+  value.organizations.forEach((snapshot) => {
+    assertOrganizationSnapshot(snapshot);
+    const organizationId = snapshot.organization.organizationId;
+    if (organizationIds.has(organizationId)) {
+      throw new Error(`Invalid OrganizationStoreSnapshot duplicate organizationId ${organizationId}`);
+    }
+    organizationIds.add(organizationId);
+  });
 }

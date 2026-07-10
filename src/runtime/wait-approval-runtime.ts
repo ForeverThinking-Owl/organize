@@ -3,6 +3,7 @@
 // v0.3.9: runtime helpers for Skill wait_approval waiting / continue semantics
 // ============================================================================
 
+import { randomUUID } from "node:crypto";
 import type { ApprovalDecision } from "../core/types/approval";
 import type { WaitApprovalStep } from "../core/types/skill";
 import { traceLogger } from "../trace/trace-logger";
@@ -30,7 +31,7 @@ export function buildSkillApprovalRequest(
 ): SkillApprovalRequest {
   const request: SkillApprovalRequest = {
     approvalKind: "skill_step",
-    approvalRequestId: step.approvalRequestId ?? `apr_${step.stepKey}_${Date.now()}`,
+    approvalRequestId: step.approvalRequestId ?? `apr_${randomUUID()}`,
     stepKey: step.stepKey,
     reason: step.reason,
     outputKey: step.outputKey,
@@ -49,7 +50,7 @@ export function buildSkillApprovalRequest(
 }
 
 export function approvalAllowsResume(decision: ApprovalDecision): boolean {
-  return decision.decision.startsWith("approve");
+  return decision.decision === "approve" || decision.decision === "approve_with_comment";
 }
 
 export function applySkillApprovalDecision(
@@ -75,7 +76,9 @@ export function applySkillApprovalDecision(
     stepKey: request.stepKey,
     outputKey: request.outputKey,
     decision: decision.decision,
+    comment: decision.comment,
     decidedBy: decision.decidedBy,
+    decidedAt: decision.decidedAt,
   });
 
   traceLogger.record(actorRunId, "skill_step_end", {

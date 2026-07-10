@@ -7,6 +7,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { actorRuntime, ActorRunOutput } from "../runtime/actor-runtime";
+import { createRuntimeRecoveryBundle } from "../runtime/runtime-recovery-bundle";
+import type { ActorConfig } from "../core/types/actor";
+import type { SkillConfig } from "../core/types/skill";
 import { toolGateway } from "../tools/tool-gateway";
 import {
   queryOrderInfoTool, QueryOrderInfoExecutor,
@@ -18,6 +21,10 @@ import { memoryService } from "../memory/memory-service";
 import { approvalGate } from "../approvals/approval-gate";
 import { JsonMemoryStore } from "../memory/json-memory-store";
 import type { MemoryStore } from "../memory/memory-store";
+import {
+  MEMORY_SNAPSHOT_SCHEMA_VERSION,
+  type MemorySnapshot,
+} from "../memory/memory-snapshot";
 import type { TraceEvent } from "../core/types/trace";
 
 const ACTOR_CONFIG = {
@@ -70,6 +77,28 @@ const SKILL_CONFIG = {
 };
 
 interface CheckResult { label: string; pass: boolean; detail: string; }
+
+class EmptyPartitionMemoryStore implements MemoryStore {
+  savedSnapshot: MemorySnapshot | null = null;
+
+  async load(): Promise<MemorySnapshot> {
+    return {
+      schemaVersion: MEMORY_SNAPSHOT_SCHEMA_VERSION,
+      savedAt: new Date().toISOString(),
+      memories: [],
+      candidates: [],
+      lastWriteSummary: null,
+    };
+  }
+
+  async save(snapshot: MemorySnapshot): Promise<void> {
+    this.savedSnapshot = structuredClone(snapshot);
+  }
+
+  async clear(): Promise<void> {
+    this.savedSnapshot = null;
+  }
+}
 
 function registerTools(): void {
   toolGateway.registerDefinition(queryOrderInfoTool);
@@ -188,6 +217,84 @@ async function main() {
     console.log("  HasStoreTrace: " + hasStoreEvent(noStore));
     console.log();
 
+    resetRuntime();
+    const otherOrganizationId = "org_runtime_store_isolation";
+    memoryService.addMemory({
+      organizationId: otherOrganizationId,
+      actorId: "other_actor",
+      scope: "actor_private",
+      type: "procedural",
+      content: "other organization memory must survive",
+      status: "active",
+      confidence: 1,
+      importance: 1,
+      sourceType: "seed",
+      visibility: "actor_private",
+    });
+    const partitionStore = new EmptyPartitionMemoryStore();
+    const partitionRun = await runPractice(
+      "验证 Runtime MemoryStore 组织分区隔离。",
+      "ORDER_PARTITION",
+      partitionStore
+    );
+    const otherPartitionPreserved =
+      memoryService.dumpOrganizationSnapshot(otherOrganizationId).memories.length === 1;
+    const storedOnlyCurrentOrganization = Boolean(
+      partitionStore.savedSnapshot &&
+      partitionStore.savedSnapshot.memories.length > 0 &&
+      partitionStore.savedSnapshot.memories.every(
+        (memory) => memory.organizationId === ACTOR_CONFIG.organization_id
+      ) &&
+      partitionStore.savedSnapshot.candidates.every(
+        (candidate) => candidate.organizationId === ACTOR_CONFIG.organization_id
+      )
+    );
+
+    resetRuntime();
+    const concurrentActor = structuredClone(ACTOR_CONFIG) as ActorConfig;
+    concurrentActor.memory = ["PENDING_SEED"];
+    concurrentActor.permissions.allowed_skills = ["partition_pending", "partition_terminal"];
+    const pendingSkill: SkillConfig = {
+      skill_id: "partition_pending",
+      name: "Partition Pending",
+      owner_actor_id: concurrentActor.actor_id,
+      steps: [
+        { step_key: "wait", type: "human_input", prompt: "wait", output_key: "wait" },
+        { step_key: "return", type: "return" },
+      ],
+    };
+    const terminalSkill: SkillConfig = {
+      skill_id: "partition_terminal",
+      name: "Partition Terminal",
+      owner_actor_id: concurrentActor.actor_id,
+      steps: [{ step_key: "return", type: "return", output_mapping: { ok: "true" } }],
+    };
+    const pendingPartitionRun = await actorRuntime.run({
+      actorConfig: concurrentActor,
+      skillConfig: pendingSkill,
+      input: { text: "preserve pending partition" },
+    });
+    const staleSameOrganizationStore = new EmptyPartitionMemoryStore();
+    const terminalActor = structuredClone(concurrentActor);
+    terminalActor.memory = [];
+    const terminalPartitionRun = await actorRuntime.run({
+      actorConfig: terminalActor,
+      skillConfig: terminalSkill,
+      input: { text: "stale same-organization load" },
+      runtimeOptions: { memoryStore: staleSameOrganizationStore },
+    });
+    const pendingSeedPreserved = memoryService.dumpOrganizationSnapshot(
+      concurrentActor.organization_id!
+    ).memories.some((memory) => memory.content === "PENDING_SEED");
+    let pendingBundleStillValid = false;
+    try {
+      createRuntimeRecoveryBundle(pendingPartitionRun.actorRunId);
+      pendingBundleStillValid = true;
+    } catch {
+      pendingBundleStillValid = false;
+    }
+    actorRuntime.clearRun(pendingPartitionRun.actorRunId);
+
     const checks: CheckResult[] = [
       {
         label: "空 JsonMemoryStore 初始 load 返回 null",
@@ -239,10 +346,28 @@ async function main() {
         pass: noStore.status === "completed" && !hasStoreEvent(noStore),
         detail: "status=" + noStore.status + ", hasStoreTrace=" + hasStoreEvent(noStore),
       },
+      {
+        label: "organization-scoped MemoryStore load preserves other partitions",
+        pass: partitionRun.status === "completed" && otherPartitionPreserved,
+        detail: `status=${partitionRun.status}, preserved=${otherPartitionPreserved}`,
+      },
+      {
+        label: "organization-scoped MemoryStore save exports only the current partition",
+        pass: storedOnlyCurrentOrganization,
+        detail: String(storedOnlyCurrentOrganization),
+      },
+      {
+        label: "stale same-organization load cannot roll back a concurrent pending run",
+        pass:
+          terminalPartitionRun.status === "completed" &&
+          pendingSeedPreserved &&
+          pendingBundleStillValid,
+        detail: `${terminalPartitionRun.status}/${pendingSeedPreserved}/${pendingBundleStillValid}`,
+      },
     ];
 
     console.log("=".repeat(60));
-    console.log("  ✅ Runtime Store Binding 验收检查 (10 条)");
+    console.log(`  ✅ Runtime Store Binding 验收检查 (${checks.length} 条)`);
     console.log("=".repeat(60));
 
     let passCount = 0;

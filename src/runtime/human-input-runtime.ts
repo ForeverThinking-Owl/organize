@@ -3,6 +3,7 @@
 // v0.3.8: runtime helpers for Skill human_input waiting / continue semantics
 // ============================================================================
 
+import { randomUUID } from "node:crypto";
 import type { HumanInputStep } from "../core/types/skill";
 import { traceLogger } from "../trace/trace-logger";
 import type { SkillState } from "./skill-runtime";
@@ -26,7 +27,7 @@ export function buildHumanInputRequest(
   actorRunId: string
 ): HumanInputRequest {
   const request: HumanInputRequest = {
-    humanInputRequestId: `hin_${step.stepKey}_${Date.now()}`,
+    humanInputRequestId: `hin_${randomUUID()}`,
     stepKey: step.stepKey,
     prompt: step.prompt,
     outputKey: step.outputKey,

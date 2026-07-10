@@ -4,6 +4,7 @@ import type { ActorConfig } from "../core/types/actor";
 import type { SkillConfig } from "../core/types/skill";
 import { memoryService } from "../memory/memory-service";
 import { JsonOrganizationStore } from "../organization/json-organization-store";
+import type { OrganizationStore } from "../organization/organization-store";
 import { OrganizationError } from "../organization/organization-error";
 import { OrganizationRuntime } from "../organization/organization-runtime";
 import type { OrganizationCapability } from "../organization/organization-permission";
@@ -113,6 +114,13 @@ function corruptedSnapshotRejected(
   } catch (error) {
     return error instanceof OrganizationError && error.code === "invalid_input";
   }
+}
+
+function stablePendingSnapshot(value: ReturnType<typeof actorRuntime.dumpPendingRun>): string {
+  if (!value) return "null";
+  const snapshot = structuredClone(value);
+  snapshot.savedAt = "<ignored>";
+  return JSON.stringify(snapshot);
 }
 
 async function main(): Promise<void> {
@@ -236,6 +244,9 @@ async function main(): Promise<void> {
     const alphaTraceCleared = traceLogger.getTrace(waitingRun.output.actorRunId) === undefined;
     const alphaPendingCleared = actorRuntime.dumpPendingRun(waitingRun.output.actorRunId) === null;
     const betaPendingSurvivedClear = Boolean(actorRuntime.dumpPendingRun(betaRun.output.actorRunId));
+    const betaPendingBeforeCorruption = stablePendingSnapshot(
+      actorRuntime.dumpPendingRun(betaRun.output.actorRunId)
+    );
     const corruptedCrossReferenceRejected = corruptedSnapshotRejected(stored, (candidate) => {
       if (candidate.messages[0]) candidate.messages[0].toActorId = "missing_actor";
     });
@@ -249,6 +260,111 @@ async function main(): Promise<void> {
     const missingActorTraceRejected = corruptedSnapshotRejected(stored, (candidate) => {
       if (candidate.runtimeRecovery) candidate.runtimeRecovery.trace.traces = [];
     });
+    const embeddedSkillMutationRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const pendingRun = candidate.runtimeRecovery?.pendingRuns[0];
+      if (pendingRun?.skill.steps[1]) {
+        pendingRun.skill.steps[1].description = "tampered future execution step";
+      }
+    });
+    const expandedPermissionRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const pendingRun = candidate.runtimeRecovery?.pendingRuns[0];
+      pendingRun?.context.permissions.allowedTools.push("forged_admin_tool");
+    });
+    const taskInputMismatchRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const pendingRun = candidate.runtimeRecovery?.pendingRuns[0];
+      if (pendingRun) pendingRun.context.input.text = "forged task input";
+    });
+    const memoryViewMutationRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const pendingRun = candidate.runtimeRecovery?.pendingRuns[0];
+      pendingRun?.context.memory.actorPrivate.push("forged cross-organization memory");
+    });
+    const auditedStateMutationRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const pendingRun = candidate.runtimeRecovery?.pendingRuns[0];
+      if (!pendingRun) return;
+      pendingRun.state.steps.query_order = { forged: true };
+      pendingRun.state.outputs.order_info = { forged: true };
+    });
+    const suspensionTokenMutationRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const events = candidate.runtimeRecovery?.trace.traces[0]?.events;
+      const suspended = [...(events ?? [])]
+        .reverse()
+        .find((event) => event.eventType === "actor_run_suspended");
+      if (suspended) suspended.data.requestId = "hin_forged_request";
+    });
+    const invalidTaskStatusRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const task = candidate.tasks.find((item) => item.status === "queued");
+      if (task) task.status = "forged" as typeof task.status;
+    });
+    const invalidTaskInputRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const task = candidate.tasks[0];
+      if (task) task.input.text = 123 as unknown as string;
+    });
+    const invalidMessageLifecycleRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const message = candidate.messages[0];
+      if (message) message.status = "forged" as typeof message.status;
+    });
+    const invalidActorPermissionsRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const actor = candidate.actors[0];
+      if (actor) {
+        actor.actorConfig.permissions.allowed_tools = null as unknown as string[];
+      }
+    });
+    const invalidOrganizationNameRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      candidate.organization.name = 1n as unknown as string;
+    });
+    const invalidUnitHierarchyRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      candidate.organization.units = [{
+        unitId: "orphan_unit",
+        name: "Orphan Unit",
+        parentUnitId: "missing_parent",
+      }];
+    });
+    const invalidActorUnitRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const actor = candidate.actors[0];
+      if (actor) actor.actorConfig.unit_id = "missing_unit";
+    });
+    const invalidOrganizationTraceTypeRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const event = candidate.trace[0];
+      if (event) event.eventType = "forged_event" as typeof event.eventType;
+    });
+    const invalidStepStateRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const pendingRun = candidate.runtimeRecovery?.pendingRuns[0];
+      if (pendingRun) pendingRun.state.currentStepIndex = 1;
+    });
+    const actorTraceSequenceRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const event = candidate.runtimeRecovery?.trace.traces[0]?.events[0];
+      if (event) event.sequence = 2;
+    });
+    const actorTraceRunReferenceRejected = corruptedSnapshotRejected(stored, (candidate) => {
+      const event = candidate.runtimeRecovery?.trace.traces[0]?.events[0];
+      if (event) event.actorRunId = "arun_forged";
+    });
+    const corruptionChecksPreserveBeta =
+      stablePendingSnapshot(actorRuntime.dumpPendingRun(betaRun.output.actorRunId)) ===
+        betaPendingBeforeCorruption &&
+      JSON.stringify(traceLogger.getTrace(betaRun.output.actorRunId)) === betaTraceBefore &&
+      (() => {
+        const current = memoryService.dumpOrganizationSnapshot(beta.organizationId);
+        return JSON.stringify({ memories: current.memories, candidates: current.candidates }) === betaMemoryBefore;
+      })();
+
+    const mismatchedStore: OrganizationStore = {
+      load: async () => structuredClone(stored),
+      save: async () => undefined,
+      delete: async () => undefined,
+      list: async () => [structuredClone(stored)],
+      clear: async () => undefined,
+    };
+    let mismatchedStoreOrganizationRejected = false;
+    try {
+      await new OrganizationRuntime(actorRuntime).loadSnapshot(
+        "org_requested_but_not_returned",
+        mismatchedStore
+      );
+    } catch (error) {
+      mismatchedStoreOrganizationRejected =
+        error instanceof OrganizationError && error.code === "cross_organization";
+    }
 
     await runtime.loadSnapshot(alpha.organizationId, store);
 
@@ -419,6 +535,101 @@ async function main(): Promise<void> {
         label: "missing Actor traces are rejected",
         pass: missingActorTraceRejected,
         detail: String(missingActorTraceRejected),
+      },
+      {
+        label: "embedded Skill mutations are rejected",
+        pass: embeddedSkillMutationRejected,
+        detail: String(embeddedSkillMutationRejected),
+      },
+      {
+        label: "expanded recovered permissions are rejected",
+        pass: expandedPermissionRejected,
+        detail: String(expandedPermissionRejected),
+      },
+      {
+        label: "recovered task input mismatches are rejected",
+        pass: taskInputMismatchRejected,
+        detail: String(taskInputMismatchRejected),
+      },
+      {
+        label: "recovered Memory view must match audited Memory ids",
+        pass: memoryViewMutationRejected,
+        detail: String(memoryViewMutationRejected),
+      },
+      {
+        label: "recovered Skill state must match audited Tool observations",
+        pass: auditedStateMutationRejected,
+        detail: String(auditedStateMutationRejected),
+      },
+      {
+        label: "recovered continuation token must match the suspend Trace",
+        pass: suspensionTokenMutationRejected,
+        detail: String(suspensionTokenMutationRejected),
+      },
+      {
+        label: "recovery rejects unknown Task status",
+        pass: invalidTaskStatusRejected,
+        detail: String(invalidTaskStatusRejected),
+      },
+      {
+        label: "recovery rejects malformed Task input",
+        pass: invalidTaskInputRejected,
+        detail: String(invalidTaskInputRejected),
+      },
+      {
+        label: "recovery rejects malformed Message lifecycle",
+        pass: invalidMessageLifecycleRejected,
+        detail: String(invalidMessageLifecycleRejected),
+      },
+      {
+        label: "recovery rejects malformed Actor permissions",
+        pass: invalidActorPermissionsRejected,
+        detail: String(invalidActorPermissionsRejected),
+      },
+      {
+        label: "recovery rejects non-JSON organization identity fields",
+        pass: invalidOrganizationNameRejected,
+        detail: String(invalidOrganizationNameRejected),
+      },
+      {
+        label: "recovery rejects invalid organization unit hierarchy",
+        pass: invalidUnitHierarchyRejected,
+        detail: String(invalidUnitHierarchyRejected),
+      },
+      {
+        label: "recovery rejects Actor references to missing units",
+        pass: invalidActorUnitRejected,
+        detail: String(invalidActorUnitRejected),
+      },
+      {
+        label: "recovery rejects unknown Organization Trace event types",
+        pass: invalidOrganizationTraceTypeRejected,
+        detail: String(invalidOrganizationTraceTypeRejected),
+      },
+      {
+        label: "loadSnapshot rejects a Store response for another organization",
+        pass: mismatchedStoreOrganizationRejected,
+        detail: String(mismatchedStoreOrganizationRejected),
+      },
+      {
+        label: "invalid pending Skill state is rejected",
+        pass: invalidStepStateRejected,
+        detail: String(invalidStepStateRejected),
+      },
+      {
+        label: "corrupted Actor Trace sequence is rejected",
+        pass: actorTraceSequenceRejected,
+        detail: String(actorTraceSequenceRejected),
+      },
+      {
+        label: "corrupted Actor Trace run references are rejected",
+        pass: actorTraceRunReferenceRejected,
+        detail: String(actorTraceRunReferenceRejected),
+      },
+      {
+        label: "failed recovery preflight preserves another organization",
+        pass: corruptionChecksPreserveBeta,
+        detail: String(corruptionChecksPreserveBeta),
       },
       {
         label: "concurrent store saves preserve both organizations",

@@ -3,25 +3,16 @@
 // v0.4.4: explicit suspend / resume lifecycle supports external events
 // ============================================================================
 
+import { randomUUID } from "node:crypto";
 import { TraceEvent, TraceEventType, ActorRunTrace } from "../core/types/trace";
-import { TRACE_SNAPSHOT_SCHEMA_VERSION, type TraceSnapshot } from "./trace-snapshot";
-
-let traceCounter = 0;
+import {
+  TRACE_SNAPSHOT_SCHEMA_VERSION,
+  assertTraceSnapshot,
+  type TraceSnapshot,
+} from "./trace-snapshot";
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
-}
-
-function maxCounterFromEventIds(traces: ActorRunTrace[]): number {
-  let max = 0;
-  for (const trace of traces) {
-    for (const event of trace.events) {
-      if (!event.eventId.startsWith("evt_")) continue;
-      const n = Number(event.eventId.slice("evt_".length));
-      if (Number.isInteger(n) && n > max) max = n;
-    }
-  }
-  return max;
 }
 
 export type RunTerminalStatus = "completed" | "error";
@@ -87,22 +78,23 @@ export class TraceLogger {
     const resolvedStepKey = stepKey ?? (data.stepKey as string | undefined);
 
     trace.events.push({
-      eventId: "evt_" + String(++traceCounter),
+      eventId: `evt_${randomUUID()}`,
       actorRunId,
       sequence: trace.events.length + 1,
       eventType,
       timestamp: new Date().toISOString(),
       stepKey: resolvedStepKey,
-      data,
+      data: cloneJson(data),
     });
   }
 
   getTrace(actorRunId: string): ActorRunTrace | undefined {
-    return this.traces.get(actorRunId);
+    const trace = this.traces.get(actorRunId);
+    return trace ? cloneJson(trace) : undefined;
   }
 
   getAllTraces(): ActorRunTrace[] {
-    return Array.from(this.traces.values());
+    return cloneJson(Array.from(this.traces.values()));
   }
 
   dumpSnapshot(): TraceSnapshot {
@@ -123,37 +115,40 @@ export class TraceLogger {
   }
 
   restoreSnapshot(snapshot: TraceSnapshot): void {
-    if (snapshot.schemaVersion !== TRACE_SNAPSHOT_SCHEMA_VERSION) {
-      throw new Error("Unsupported TraceSnapshot schemaVersion: " + String(snapshot.schemaVersion));
-    }
+    assertTraceSnapshot(snapshot);
 
     const traces = cloneJson(snapshot.traces);
     this.traces = new Map(traces.map((trace) => [trace.actorRunId, trace]));
-    traceCounter = maxCounterFromEventIds(traces);
   }
 
   /** Upsert selected run traces without replacing unrelated process state. */
   restoreRunsSnapshot(snapshot: TraceSnapshot): void {
-    if (snapshot.schemaVersion !== TRACE_SNAPSHOT_SCHEMA_VERSION) {
-      throw new Error("Unsupported TraceSnapshot schemaVersion: " + String(snapshot.schemaVersion));
-    }
+    assertTraceSnapshot(snapshot);
 
-    for (const trace of cloneJson(snapshot.traces)) {
+    const incoming = cloneJson(snapshot.traces);
+    const incomingRunIds = new Set(incoming.map((trace) => trace.actorRunId));
+    assertTraceSnapshot({
+      schemaVersion: TRACE_SNAPSHOT_SCHEMA_VERSION,
+      savedAt: snapshot.savedAt,
+      traces: [
+        ...cloneJson(this.getAllTraces().filter((trace) => !incomingRunIds.has(trace.actorRunId))),
+        ...incoming,
+      ],
+    });
+
+    for (const trace of incoming) {
       this.traces.set(trace.actorRunId, trace);
     }
-    traceCounter = maxCounterFromEventIds(this.getAllTraces());
   }
 
   clearRuns(actorRunIds: Iterable<string>): void {
     for (const actorRunId of actorRunIds) {
       this.traces.delete(actorRunId);
     }
-    traceCounter = maxCounterFromEventIds(this.getAllTraces());
   }
 
   clear(): void {
     this.traces.clear();
-    traceCounter = 0;
   }
 }
 

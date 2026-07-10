@@ -1,5 +1,7 @@
 import type { ActorConfig } from "../core/types/actor";
 import type { SkillConfig } from "../core/types/skill";
+import { parseSkillConfig } from "../runtime/runtime-skill-config";
+import { assertActorConfig } from "../runtime/actor-config-validation";
 import { OrganizationError } from "./organization-error";
 import {
   assertCapability,
@@ -28,12 +30,33 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+function assertValidSkillConfig(skill: SkillConfig, actorId: string): void {
+  try {
+    parseSkillConfig(skill, actorId);
+  } catch (error) {
+    throw new OrganizationError(
+      "invalid_input",
+      `Skill ${String(skill?.skill_id ?? "unknown")} is invalid: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+}
+
 export class ActorRegistry {
   private actors = new Map<string, RegisteredActor>();
 
   constructor(public readonly organizationId: string) {}
 
   register(input: RegisterActorInput): RegisteredActor {
+    try {
+      assertActorConfig(input.actorConfig);
+    } catch (error) {
+      throw new OrganizationError(
+        "invalid_input",
+        error instanceof Error ? error.message : String(error)
+      );
+    }
     const actorId = input.actorConfig.actor_id;
     if (input.actorConfig.organization_id !== this.organizationId) {
       throw new OrganizationError(
@@ -51,6 +74,7 @@ export class ActorRegistry {
     const allowedSkills = new Set(input.actorConfig.permissions.allowed_skills ?? []);
     const skills: Record<string, SkillConfig> = {};
     for (const skill of input.skills) {
+      assertValidSkillConfig(skill, actorId);
       if (skill.owner_actor_id && skill.owner_actor_id !== actorId) {
         throw new OrganizationError(
           "invalid_input",
@@ -121,6 +145,14 @@ export class ActorRegistry {
   restore(actors: RegisteredActor[]): void {
     this.actors.clear();
     for (const actor of actors) {
+      try {
+        assertActorConfig(actor.actorConfig);
+      } catch (error) {
+        throw new OrganizationError(
+          "invalid_input",
+          error instanceof Error ? error.message : String(error)
+        );
+      }
       if (actor.organizationId !== this.organizationId) {
         throw new OrganizationError("cross_organization", "Actor snapshot crosses organizations");
       }
@@ -135,6 +167,7 @@ export class ActorRegistry {
       const allowedSkills = new Set(actor.actorConfig.permissions.allowed_skills ?? []);
       const restoredSkillIds = new Set<string>();
       for (const [skillId, skill] of Object.entries(actor.skills)) {
+        assertValidSkillConfig(skill, actor.actorId);
         if (skillId !== skill.skill_id || restoredSkillIds.has(skill.skill_id)) {
           throw new OrganizationError("invalid_input", `Actor ${actor.actorId} has inconsistent Skill ids`);
         }

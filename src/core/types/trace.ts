@@ -31,6 +31,7 @@ export type TraceEventType =
   | "external_event_requested"
   | "external_event_received"
   | "external_event_validation_failed"
+  | "continuation_validation_failed"
   | "llm_call_start"
   | "llm_call_end"
   | "llm_validation_failed"

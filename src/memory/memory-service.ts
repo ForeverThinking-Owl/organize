@@ -3,6 +3,8 @@
 // v0.3.3: MemoryCandidate / MemoryRecord 写入观测、稳定 fingerprint、快照恢复
 // ============================================================================
 
+import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   HybridMemoryView,
   MemoryCandidate,
@@ -17,8 +19,6 @@ import { memoryExtractor, MemoryExtractionInput } from "./memory-extractor";
 import { memoryPolicy } from "./memory-policy";
 import { memoryFingerprint, normalizeMemoryText } from "./memory-fingerprint";
 import { MEMORY_SNAPSHOT_SCHEMA_VERSION, type MemorySnapshot } from "./memory-snapshot";
-
-let memoryCounter = 0;
 
 export interface CandidateInput {
   inputText: string;
@@ -86,16 +86,6 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-function maxCounterFromIds(ids: string[], prefix: string): number {
-  let max = 0;
-  for (const id of ids) {
-    if (!id.startsWith(prefix)) continue;
-    const n = Number(id.slice(prefix.length));
-    if (Number.isInteger(n) && n > max) max = n;
-  }
-  return max;
-}
-
 function typeBucket(type: MemoryType): keyof Omit<HybridMemoryView,
   "working" | "organizationPublic" | "unitMemory" | "actorPrivate" | "sceneShared"> {
   if (type === "episodic" || type === "run_summary") return "episodic";
@@ -160,11 +150,6 @@ export class MemoryService {
     this.candidateFingerprints = new Set(this.candidates.map((candidate) => memoryFingerprint(candidate)));
   }
 
-  private restoreCounters(): void {
-    memoryCounter = maxCounterFromIds(this.memories.map((m) => m.memoryId), "mem_");
-    memoryExtractor.setCounter(maxCounterFromIds(this.candidates.map((c) => c.candidateId), "cand_"));
-  }
-
   private addMemoryWithResult(entry: Omit<MemoryRecord, "memoryId" | "createdAt">): MemoryAddResult {
     const fingerprint = memoryFingerprint(entry);
     const existing = this.memories.find((m) =>
@@ -181,7 +166,7 @@ export class MemoryService {
     const now = new Date().toISOString();
     const memory: MemoryRecord = {
       ...entry,
-      memoryId: `mem_${++memoryCounter}`,
+      memoryId: `mem_${randomUUID()}`,
       createdAt: now,
       updatedAt: now,
       useCount: entry.useCount ?? 0,
@@ -214,7 +199,6 @@ export class MemoryService {
     this.candidates = cloneJson(snapshot.candidates);
     this.lastWriteSummary = snapshot.lastWriteSummary ? cloneJson(snapshot.lastWriteSummary) : null;
     this.rebuildFingerprints();
-    this.restoreCounters();
   }
 
   /**
@@ -253,14 +237,104 @@ export class MemoryService {
     this.memories = [...otherMemories, ...cloneJson(snapshot.memories)];
     this.candidates = [...otherCandidates, ...cloneJson(snapshot.candidates)];
     this.rebuildFingerprints();
-    this.restoreCounters();
+  }
+
+  /**
+   * Merge a recovery bundle's organization partition without rolling back
+   * records already restored by another pending run from the same organization.
+   * Existing ids win only when their immutable identity/content agrees.
+   */
+  mergeOrganizationSnapshot(organizationId: string, snapshot: MemorySnapshot): void {
+    if (snapshot.schemaVersion !== MEMORY_SNAPSHOT_SCHEMA_VERSION) {
+      throw new Error("Unsupported MemorySnapshot schemaVersion: " + String(snapshot.schemaVersion));
+    }
+    if (snapshot.memories.some((memory) => memory.organizationId !== organizationId)) {
+      throw new Error(`MemorySnapshot contains memory outside organization ${organizationId}`);
+    }
+    if (snapshot.candidates.some((candidate) => candidate.organizationId !== organizationId)) {
+      throw new Error(`MemorySnapshot contains candidate outside organization ${organizationId}`);
+    }
+
+    const memoryIdentity = (memory: MemoryRecord) => ({
+      memoryId: memory.memoryId,
+      organizationId: memory.organizationId,
+      unitId: memory.unitId,
+      actorId: memory.actorId,
+      sceneId: memory.sceneId,
+      scope: memory.scope,
+      type: memory.type,
+      content: memory.content,
+      structuredData: memory.structuredData,
+      visibility: memory.visibility,
+      sourceType: memory.sourceType,
+      sourceRunId: memory.sourceRunId,
+      sourceActorId: memory.sourceActorId,
+      createdAt: memory.createdAt,
+    });
+    const candidateIdentity = (candidate: MemoryCandidate) => ({
+      candidateId: candidate.candidateId,
+      actorRunId: candidate.actorRunId,
+      actorId: candidate.actorId,
+      organizationId: candidate.organizationId,
+      unitId: candidate.unitId,
+      sceneId: candidate.sceneId,
+      scope: candidate.scope,
+      type: candidate.type,
+      content: candidate.content,
+      structuredData: candidate.structuredData,
+      sourceType: candidate.sourceType,
+      createdAt: candidate.createdAt,
+    });
+
+    for (const incoming of cloneJson(snapshot.memories)) {
+      const existing = this.memories.find(
+        (memory) =>
+          memory.organizationId === organizationId && memory.memoryId === incoming.memoryId
+      );
+      if (existing) {
+        if (!isDeepStrictEqual(memoryIdentity(existing), memoryIdentity(incoming))) {
+          throw new Error(`MemorySnapshot conflicts with existing memory ${incoming.memoryId}`);
+        }
+        const existingVersion = existing.updatedAt ?? existing.lastUsedAt ?? existing.createdAt;
+        const incomingVersion = incoming.updatedAt ?? incoming.lastUsedAt ?? incoming.createdAt;
+        const newer = incomingVersion > existingVersion ? incoming : existing;
+        Object.assign(existing, cloneJson(newer), {
+          confidence: Math.max(existing.confidence ?? 0, incoming.confidence ?? 0),
+          importance: Math.max(existing.importance ?? 0, incoming.importance ?? 0),
+          useCount: Math.max(existing.useCount ?? 0, incoming.useCount ?? 0),
+          updatedAt: [existing.updatedAt, incoming.updatedAt].filter(Boolean).sort().at(-1),
+          lastUsedAt: [existing.lastUsedAt, incoming.lastUsedAt].filter(Boolean).sort().at(-1),
+        });
+      } else {
+        this.memories.push(incoming);
+      }
+    }
+    for (const incoming of cloneJson(snapshot.candidates)) {
+      const existing = this.candidates.find(
+        (candidate) =>
+          candidate.organizationId === organizationId &&
+          candidate.candidateId === incoming.candidateId
+      );
+      if (existing) {
+        if (!isDeepStrictEqual(candidateIdentity(existing), candidateIdentity(incoming))) {
+          throw new Error(`MemorySnapshot conflicts with existing candidate ${incoming.candidateId}`);
+        }
+        existing.confidence = Math.max(existing.confidence ?? 0, incoming.confidence ?? 0);
+        existing.importance = Math.max(existing.importance ?? 0, incoming.importance ?? 0);
+        if (existing.status === "candidate" && incoming.status !== "candidate") {
+          existing.status = incoming.status;
+        }
+      } else {
+        this.candidates.push(incoming);
+      }
+    }
+    this.rebuildFingerprints();
   }
 
   clearOrganization(organizationId: string): void {
     this.memories = this.memories.filter((memory) => memory.organizationId !== organizationId);
     this.candidates = this.candidates.filter((candidate) => candidate.organizationId !== organizationId);
     this.rebuildFingerprints();
-    this.restoreCounters();
   }
 
   getOrganizationPublic(organizationId: string): string[] {
@@ -494,7 +568,6 @@ export class MemoryService {
     this.memoryFingerprints.clear();
     this.candidateFingerprints.clear();
     this.lastWriteSummary = null;
-    memoryCounter = 0;
     memoryExtractor.reset();
   }
 }
