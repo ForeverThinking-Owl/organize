@@ -11,7 +11,8 @@ import {
   type PendingToolApprovalSnapshot,
 } from "./pending-run-snapshot";
 import { buildCanonicalPendingToolDescriptor } from "./pending-tool-descriptor";
-import { resolveTemplateValue, type SkillState } from "./skill-runtime";
+import { resolveExternalEventCorrelationKey } from "./external-event-correlation";
+import type { SkillState } from "./skill-runtime";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -374,9 +375,11 @@ function assertSkillApprovalRequest(value: unknown, currentStep: SkillStep): voi
 }
 
 function expectedCorrelationKey(step: Extract<SkillStep, { type: "wait_external_event" }>, state: SkillState): string | undefined {
-  if (step.correlationKey === undefined) return undefined;
-  const value = resolveTemplateValue(step.correlationKey, state);
-  return value === undefined || value === null ? undefined : String(value);
+  try {
+    return resolveExternalEventCorrelationKey(step, state);
+  } catch (error) {
+    invalid(error instanceof Error ? error.message : String(error));
+  }
 }
 
 function assertExternalEventRequest(value: unknown, currentStep: SkillStep, state: SkillState): void {

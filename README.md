@@ -37,10 +37,10 @@ OrganizationSnapshot：按组织保存 Registry、Task、Inbox、Trace 与 pendi
 ## 当前版本
 
 ```text
-v0.5.0 — Organization Runtime Foundation
+v0.5.1 — Governance Fail-Closed
 ```
 
-当前版本在可靠的单 Actor Runtime 之上新增真正的组织编排层：组织隔离的 Actor Registry、能力校验、不可变 Task 状态机、单 Runtime 原子队列 claim、ActorRuntime `run / continue` 调度、FIFO Actor Inbox、组织级 Trace，以及可持久化的 OrganizationSnapshot。四类 continuation 都会在 resume 前完成校验，非法事件保留 pending run 供合法事件重试；恢复会把 Snapshot 中的执行状态与 Registry、Task、Tool 和 Trace 做完整 preflight。Actor run 使用 UUID，恢复一个组织不会覆盖另一个组织。
+当前版本保留 v0.5.0 的 Organization Runtime Foundation，并补上两个 fail-closed 治理边界：Tool approval 目前只实现 `beforeCall`，声明 `afterCall` 或 `beforeWriteback` 的 Tool 会在注册时被拒绝；声明了 `correlation_key` 的 external-event wait 及其每个插值 token 都必须在进入等待前解析为非空标量，且不能残留模板占位符。解析失败会终止该 run，不创建 pending request，也不记录 `external_event_requested`。v0.5.0 的不安全 pending snapshot 在恢复时同样会被拒绝。
 
 版本历史、验收矩阵、CI 覆盖和下一步计划见 [CHANGELOG.md](./CHANGELOG.md)。
 
@@ -80,6 +80,7 @@ npm run demo:recovery:bundle       # Runtime Recovery Bundle Demo
 npm run demo:recovery:cross-process # Cross-process Recovery Demo
 npm run demo:external:event        # External Event Runtime Demo
 npm run demo:external:event:validation # External Event Validation Demo
+npm run demo:tool:approval:fail-closed # Tool Approval Fail-Closed Demo
 npm run demo:continuation:validation # Retry-safe Continuation Validation Demo
 npm run demo:organization          # Organization Runtime Demo
 npm run demo:organization:recovery # Organization Snapshot / Recovery Demo
@@ -115,6 +116,7 @@ OrganizationRuntime
 - PendingRun、RuntimeRecoveryBundle 与 Organization snapshot/store 使用 v2 schema；缺少 Tool policy fingerprint 的 v1 Tool-approval checkpoint 会安全拒绝。
 - `runtimeOptions.memoryStore` 按当前 organization 分区 merge / save，不覆盖同进程其他组织或同组织并发 pending run。
 - Tool approval 固化 policy fingerprint；Tool 定义、请求与 observation 在边界深拷贝并校验 identity、JSON shape 与 output schema。
+- Tool approval 当前只支持 `beforeCall`；`afterCall` 与 `beforeWriteback` 是预留阶段，Tool 注册会明确拒绝，避免治理配置被静默忽略。
 - Snapshot preflight 提供结构与内部一致性校验，不提供加密真实性；将快照放在不可信存储时仍需要由部署层提供签名或完整性保护。
 - `clearOrganization()` 是可信宿主生命周期 API；存在 in-flight dispatch / continue 时会拒绝清理，避免产生 orphan Actor run。
 - OrganizationRuntime ownership 是进程内状态；宿主卸载组织时必须显式调用 `clearOrganization()` 释放。
@@ -125,6 +127,8 @@ OrganizationRuntime
 ## External Event Safety
 
 `wait_external_event` 可声明 `event_schema` 和 `correlation_key`：
+
+一旦声明 `correlation_key`，最终结果及每个 `{{...}}` 插值 token 都必须在 suspend 前解析为非空的 string / number / boolean。缺失、空值、对象、数组或未解析模板都会让 run fail closed，包括对象或空值嵌入 `tenant/{{context.id}}` 这样的部分模板；未声明 correlation 的 Skill 保持兼容。
 
 ```ts
 {
@@ -199,10 +203,10 @@ MemorySnapshot → TraceSnapshot → PendingRunSnapshot
 ## Current Version
 
 ```text
-v0.5.0 — Organization Runtime Foundation
+v0.5.1 — Governance Fail-Closed
 ```
 
-This version introduces a real organization layer above ActorRuntime: organization-scoped actor registries, capability enforcement, immutable task lifecycles, single-runtime atomic queue claims, ActorRuntime dispatch/continue bindings, FIFO inboxes, organization traces, and persistent organization recovery snapshots. All four continuation kinds validate before resume and preserve pending runs after invalid input. Recovery validates snapshot execution state against canonical Actor, Skill, Tool, Task, and Trace state before commit, while UUID run IDs prevent cross-process collisions. Caller actor IDs must come from a trusted host authentication boundary; runtime capabilities provide authorization, not authentication.
+This version retains the v0.5.0 Organization Runtime Foundation and closes two governance gaps. Tool approval currently implements only `beforeCall`; Tool definitions that declare `afterCall` or `beforeWriteback` now fail registration instead of silently bypassing those policies. A configured external-event correlation key and every interpolation token must resolve before suspension to a non-empty scalar with no unresolved template delimiters. Unsafe setup ends the run without a pending request or `external_event_requested` Trace, and unsafe v0.5.0 pending snapshots fail closed on restore.
 
 Recovery is at-least-once. Tool executors must durably deduplicate the stable snapshot `toolCallId`, and the host owns checkpoint advancement/deletion; crash-safe exactly-once delivery requires a transactional outbox or durable idempotency store. JSON stores serialize atomic replacement only within one instance, so shared multi-instance/process files require an external lock or single writer. PendingRun, RuntimeRecoveryBundle, and Organization checkpoint schemas are v2 and reject unsafe v1 Tool-approval checkpoints that lack a policy fingerprint.
 
@@ -224,6 +228,7 @@ npm run demo:recovery:bundle
 npm run demo:recovery:cross-process
 npm run demo:external:event
 npm run demo:external:event:validation
+npm run demo:tool:approval:fail-closed
 npm run demo:continuation:validation
 npm run demo:organization
 npm run demo:organization:recovery

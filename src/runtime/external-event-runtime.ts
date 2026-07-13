@@ -6,7 +6,8 @@
 import { randomUUID } from "node:crypto";
 import type { WaitExternalEventStep } from "../core/types/skill";
 import { traceLogger } from "../trace/trace-logger";
-import { resolveTemplateValue, type SkillState } from "./skill-runtime";
+import type { SkillState } from "./skill-runtime";
+import { resolveExternalEventCorrelationKey } from "./external-event-correlation";
 import { summarizePayload } from "./external-event-validation";
 
 export interface ExternalEventRequest {
@@ -37,23 +38,19 @@ export interface ExternalEventRecord {
   receivedAt: string;
 }
 
-function optionalResolvedString(template: string | undefined, state: SkillState): string | undefined {
-  if (template === undefined) return undefined;
-  const value = resolveTemplateValue(template, state);
-  if (value === undefined || value === null) return undefined;
-  return String(value);
-}
-
 export function buildExternalEventRequest(
   step: WaitExternalEventStep,
   state: SkillState,
   actorRunId: string
 ): ExternalEventRequest {
+  // Resolve and validate before allocating a request id or writing request
+  // Trace events. A failed correlation must never become a pending wait.
+  const correlationKey = resolveExternalEventCorrelationKey(step, state);
   const request: ExternalEventRequest = {
     externalEventRequestId: `evt_wait_${randomUUID()}`,
     stepKey: step.stepKey,
     eventName: step.eventName,
-    correlationKey: optionalResolvedString(step.correlationKey, state),
+    correlationKey,
     reason: step.reason,
     outputKey: step.outputKey,
     eventSchema: step.eventSchema,

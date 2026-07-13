@@ -86,6 +86,14 @@ function assertToolDefinition(definition: unknown): asserts definition is ToolDe
   if (Object.keys(definition.approvalPolicy).some((field) => !stages.has(field))) {
     throw new Error(`Tool ${definition.toolName} approvalPolicy has unsupported stages`);
   }
+  const unimplementedStage = (["afterCall", "beforeWriteback"] as const).find((stage) =>
+    Object.prototype.hasOwnProperty.call(definition.approvalPolicy, stage)
+  );
+  if (unimplementedStage) {
+    throw new Error(
+      `Tool ${definition.toolName} approvalPolicy.${unimplementedStage} is not implemented; only beforeCall is supported`
+    );
+  }
   for (const [stageName, stageValue] of Object.entries(definition.approvalPolicy)) {
     if (!isPlainRecord(stageValue)) {
       throw new Error(`Tool ${definition.toolName} ${stageName} policy must be an object`);
@@ -188,11 +196,10 @@ export class ToolGateway {
     request: ToolCallRequest,
     actorRunId: string
   ): Promise<ToolObservation> {
-    traceLogger.record(actorRunId, "tool_call_start", {
-      toolName: request.toolName,
-      arguments: request.arguments,
-      toolCallId: request.toolCallId,
-    });
+    const definition = this.toolDefinitions.get(request.toolName);
+    if (!definition) {
+      throw new Error(`Tool ${request.toolName} has no registered definition`);
+    }
 
     const executor = this.executors.get(request.toolName);
     if (!executor) {
@@ -207,15 +214,20 @@ export class ToolGateway {
       return obs;
     }
 
-    const definition = this.toolDefinitions.get(request.toolName);
-    if (!definition) {
-      throw new Error(`Tool ${request.toolName} has no registered definition`);
-    }
-    const observation = await executor.execute(cloneJson(request));
-    assertObservation(observation, request, definition);
+    // Validate and detach the request before declaring execution started. An
+    // invalid request must never produce a false tool_call_start event.
+    const safeRequest = cloneJson(request);
+    traceLogger.record(actorRunId, "tool_call_start", {
+      toolName: safeRequest.toolName,
+      arguments: safeRequest.arguments,
+      toolCallId: safeRequest.toolCallId,
+    });
+
+    const observation = await executor.execute(cloneJson(safeRequest));
+    assertObservation(observation, safeRequest, definition);
     const safeObservation = cloneJson(observation);
     traceLogger.record(actorRunId, "tool_call_end", {
-      toolName: request.toolName,
+      toolName: safeRequest.toolName,
       status: safeObservation.status,
     });
     traceLogger.record(actorRunId, "tool_observation", safeObservation as unknown as Record<string, unknown>);

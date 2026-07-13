@@ -1,6 +1,6 @@
 // ============================================================================
-// external-event-validation.demo.ts — v0.4.5
-// 验证 external event schema / correlation validation 与恢复后拒绝路径
+// external-event-validation.demo.ts — v0.5.1
+// 验证 external event correlation fail-closed、schema 校验与恢复后拒绝路径
 // ============================================================================
 
 import { actorRuntime, ActorRunOutput } from "../runtime/actor-runtime";
@@ -12,6 +12,8 @@ import { approvalGate } from "../approvals/approval-gate";
 import { createRuntimeRecoveryBundle, restoreRuntimeRecoveryBundle } from "../runtime/runtime-recovery-bundle";
 import type { TraceEvent } from "../core/types/trace";
 import { validateExternalEventCorrelation } from "../runtime/external-event-validation";
+import type { SkillConfig } from "../core/types/skill";
+import type { PendingRunSnapshot } from "../runtime/pending-run-snapshot";
 
 const ACTOR_CONFIG = {
   actor_id: "customer_service_actor", organization_id: "org_001",
@@ -76,6 +78,13 @@ interface ScenarioResult {
   hasErrorEnd: boolean;
   hasErrorTrace: boolean;
   traceEventCountAfterRestore?: number;
+}
+
+interface CorrelationSetupScenario {
+  output: ActorRunOutput;
+  events: TraceEvent[];
+  pendingSnapshot: PendingRunSnapshot | null;
+  errorMessage?: string;
 }
 
 function registerTools(): void {
@@ -284,6 +293,126 @@ async function runRecoveryInvalidScenario(): Promise<ScenarioResult> {
   return scenario;
 }
 
+function correlationOnlySkillConfig(correlationKey?: string): SkillConfig {
+  const waitStep: Record<string, unknown> = {
+    step_key: "wait_payment",
+    type: "wait_external_event",
+    event_name: "payment.confirmed",
+    output_key: "payment_event",
+  };
+  if (correlationKey !== undefined) waitStep.correlation_key = correlationKey;
+
+  return {
+    skill_id: "external_event_validation",
+    name: "External Event Correlation Fail-Closed",
+    owner_actor_id: "customer_service_actor",
+    steps: [
+      waitStep as SkillConfig["steps"][number],
+      {
+        step_key: "return",
+        type: "return",
+        output_mapping: { status: "completed" },
+      },
+    ],
+  };
+}
+
+async function runCorrelationSetupScenario(
+  correlationKey: string | undefined,
+  runtimeContext: Record<string, unknown> = {}
+): Promise<CorrelationSetupScenario> {
+  resetRuntime();
+  const output = await actorRuntime.run({
+    actorConfig: ACTOR_CONFIG,
+    skillConfig: correlationOnlySkillConfig(correlationKey),
+    input: { text: "等待 correlation fail-closed 验证事件。" },
+    runtimeContext,
+  });
+  const events = [...traceEvents(output)];
+  const pendingSnapshot = actorRuntime.dumpPendingRun(output.actorRunId);
+  const errorMessage = events.find((event) => event.eventType === "error")?.data.message;
+  if (pendingSnapshot) actorRuntime.clearRun(output.actorRunId);
+  return {
+    output,
+    events,
+    pendingSnapshot,
+    errorMessage: typeof errorMessage === "string" ? errorMessage : undefined,
+  };
+}
+
+function correlationSetupFailClosedChecks(
+  label: string,
+  scenario: CorrelationSetupScenario,
+  expectedErrorFragment: string
+): CheckResult[] {
+  const eventTypes = scenario.events.map((event) => event.eventType);
+  return [
+    {
+      label: `${label}: run fails before waiting`,
+      pass:
+        scenario.output.status === "error" &&
+        scenario.output.pendingExternalEvent === undefined &&
+        scenario.pendingSnapshot === null,
+      detail:
+        `status=${scenario.output.status}, responsePending=${Boolean(scenario.output.pendingExternalEvent)}, ` +
+        `snapshotPending=${Boolean(scenario.pendingSnapshot)}`,
+    },
+    {
+      label: `${label}: no request or suspension Trace is written`,
+      pass:
+        !eventTypes.includes("external_event_requested") &&
+        !eventTypes.includes("actor_run_suspended"),
+      detail: JSON.stringify(eventTypes),
+    },
+    {
+      label: `${label}: security error explains the rejection`,
+      pass: scenario.errorMessage?.includes(expectedErrorFragment) === true,
+      detail: scenario.errorMessage ?? "missing error Trace",
+    },
+  ];
+}
+
+function unsafeLegacySnapshot(
+  snapshot: PendingRunSnapshot,
+  correlationKey: string
+): PendingRunSnapshot {
+  const unsafe = JSON.parse(JSON.stringify(snapshot)) as PendingRunSnapshot;
+  const step = unsafe.skill.steps[unsafe.state.currentStepIndex];
+  if (step?.type !== "wait_external_event" || !unsafe.pendingExternalEvent) {
+    throw new Error("Expected external-event pending snapshot");
+  }
+  step.correlationKey = correlationKey;
+  unsafe.pendingExternalEvent.correlationKey = correlationKey;
+  return unsafe;
+}
+
+function unsafeLegacyPartialTemplateSnapshot(
+  snapshot: PendingRunSnapshot,
+  correlationValue: unknown,
+  storedCorrelationKey: string
+): PendingRunSnapshot {
+  const unsafe = unsafeLegacySnapshot(
+    snapshot,
+    "tenant/{{context.correlation_id}}"
+  );
+  unsafe.state.context.correlation_id = correlationValue;
+  if (!unsafe.pendingExternalEvent) {
+    throw new Error("Expected external-event pending snapshot");
+  }
+  unsafe.pendingExternalEvent.correlationKey = storedCorrelationKey;
+  return unsafe;
+}
+
+function rejectedRestoreError(snapshot: PendingRunSnapshot): string | undefined {
+  try {
+    actorRuntime.restorePendingRun(snapshot);
+    actorRuntime.clearRun(snapshot.actorRunId);
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
 function successChecks(scenario: ScenarioResult): CheckResult[] {
   const output = scenario.completed.result ?? {};
   const received = scenario.received;
@@ -357,7 +486,7 @@ function rejectedChecks(label: string, scenario: ScenarioResult, expectedErrorFr
 
 async function main() {
   console.log("=".repeat(60));
-  console.log("  ForeverThinking v0.4.5 — External Event Validation Demo");
+  console.log("  ForeverThinking v0.5.1 — External Event Validation Demo");
   console.log("=".repeat(60));
   console.log();
 
@@ -390,6 +519,131 @@ async function main() {
   const retryAfterInvalid = await runInvalidThenValidScenario();
   console.log("  Rejected status: " + retryAfterInvalid.rejected.status);
   console.log("  Final status: " + retryAfterInvalid.completed.status);
+  console.log();
+
+  console.log("🛡️ Case G: unsafe configured correlations fail before waiting");
+  const unresolvedCorrelation = await runCorrelationSetupScenario(
+    "{{context.missing_correlation}}"
+  );
+  const partiallyUnresolvedCorrelation = await runCorrelationSetupScenario(
+    "ORDER-{{context.missing_correlation}}"
+  );
+  const emptyCorrelation = await runCorrelationSetupScenario(
+    "{{context.correlation_id}}",
+    { correlation_id: "" }
+  );
+  const nullCorrelation = await runCorrelationSetupScenario(
+    "{{context.correlation_id}}",
+    { correlation_id: null }
+  );
+  const objectCorrelation = await runCorrelationSetupScenario(
+    "{{context.correlation_id}}",
+    { correlation_id: { tenant: "org_001", order: "ORDER_10086" } }
+  );
+  const partialObjectCorrelation = await runCorrelationSetupScenario(
+    "tenant/{{context.correlation_id}}",
+    { correlation_id: { tenant: "org_001", order: "ORDER_10086" } }
+  );
+  const partialArrayCorrelation = await runCorrelationSetupScenario(
+    "tenant/{{context.correlation_id}}",
+    { correlation_id: ["org_001", "ORDER_10086"] }
+  );
+  const partialEmptyCorrelation = await runCorrelationSetupScenario(
+    "tenant/{{context.correlation_id}}",
+    { correlation_id: "" }
+  );
+  const partialWhitespaceCorrelation = await runCorrelationSetupScenario(
+    "tenant/{{context.correlation_id}}",
+    { correlation_id: "   " }
+  );
+  const emptyTemplateDelimiters = await runCorrelationSetupScenario("{{}}");
+  const literalBypass = await actorRuntime.continue(unresolvedCorrelation.output.actorRunId, {
+    type: "external_event_received",
+    event: {
+      externalEventRequestId: "forged_unresolved_request",
+      eventName: "payment.confirmed",
+      correlationKey: "{{context.missing_correlation}}",
+      payload: { payment_id: "PAY_FORGED", status: "confirmed" },
+    },
+  });
+  const directLiteralBypass = validateExternalEventCorrelation(
+    {
+      externalEventRequestId: "legacy_unresolved_request",
+      stepKey: "wait_payment",
+      eventName: "payment.confirmed",
+      correlationKey: "{{context.missing_correlation}}",
+      outputKey: "payment_event",
+    },
+    {
+      externalEventRequestId: "legacy_unresolved_request",
+      eventName: "payment.confirmed",
+      correlationKey: "{{context.missing_correlation}}",
+      payload: { payment_id: "PAY_FORGED", status: "confirmed" },
+    }
+  );
+  console.log("  Unresolved status: " + unresolvedCorrelation.output.status);
+  console.log("  Literal bypass status: " + literalBypass.status);
+  console.log();
+
+  console.log("✅ Case H: legal correlation modes remain compatible");
+  const literalCorrelation = await runCorrelationSetupScenario("ORDER_LITERAL");
+  const resolvedTemplateCorrelation = await runCorrelationSetupScenario(
+    "tenant/{{context.correlation_id}}",
+    { correlation_id: "ORDER_10086" }
+  );
+  const omittedCorrelation = await runCorrelationSetupScenario(undefined);
+  console.log("  Literal status: " + literalCorrelation.output.status);
+  console.log("  Resolved template status: " + resolvedTemplateCorrelation.output.status);
+  console.log("  Omitted correlation status: " + omittedCorrelation.output.status);
+  console.log();
+
+  if (!literalCorrelation.pendingSnapshot) {
+    throw new Error("Expected literal correlation pending snapshot");
+  }
+  console.log("📦 Case I: unsafe v0.5.0 pending snapshots fail closed on restore");
+  const unresolvedRestoreError = rejectedRestoreError(
+    unsafeLegacySnapshot(
+      literalCorrelation.pendingSnapshot,
+      "{{context.missing_correlation}}"
+    )
+  );
+  const emptyRestoreError = rejectedRestoreError(
+    unsafeLegacySnapshot(literalCorrelation.pendingSnapshot, "")
+  );
+  const partialObjectRestoreError = rejectedRestoreError(
+    unsafeLegacyPartialTemplateSnapshot(
+      literalCorrelation.pendingSnapshot,
+      { tenant: "org_001", order: "ORDER_10086" },
+      'tenant/{"tenant":"org_001","order":"ORDER_10086"}'
+    )
+  );
+  const partialArrayRestoreError = rejectedRestoreError(
+    unsafeLegacyPartialTemplateSnapshot(
+      literalCorrelation.pendingSnapshot,
+      ["org_001", "ORDER_10086"],
+      'tenant/["org_001","ORDER_10086"]'
+    )
+  );
+  const partialEmptyRestoreError = rejectedRestoreError(
+    unsafeLegacyPartialTemplateSnapshot(
+      literalCorrelation.pendingSnapshot,
+      "",
+      "tenant/"
+    )
+  );
+  const partialWhitespaceRestoreError = rejectedRestoreError(
+    unsafeLegacyPartialTemplateSnapshot(
+      literalCorrelation.pendingSnapshot,
+      "   ",
+      "tenant/   "
+    )
+  );
+  console.log("  Unresolved snapshot rejected: " + Boolean(unresolvedRestoreError));
+  console.log("  Empty snapshot rejected: " + Boolean(emptyRestoreError));
+  console.log("  Partial object snapshot rejected: " + Boolean(partialObjectRestoreError));
+  console.log("  Partial array snapshot rejected: " + Boolean(partialArrayRestoreError));
+  console.log("  Partial empty snapshot rejected: " + Boolean(partialEmptyRestoreError));
+  console.log("  Partial whitespace snapshot rejected: " + Boolean(partialWhitespaceRestoreError));
   console.log();
 
   const optionalCorrelation = validateExternalEventCorrelation(
@@ -440,6 +694,140 @@ async function main() {
         retryAfterInvalid.completed.status === "completed" &&
         retryAfterInvalid.completed.result?.payment_id === "PAY_10086",
       detail: JSON.stringify(retryAfterInvalid.completed.result),
+    },
+    ...correlationSetupFailClosedChecks(
+      "missing correlation template",
+      unresolvedCorrelation,
+      "contains an unresolved template"
+    ),
+    ...correlationSetupFailClosedChecks(
+      "partially unresolved correlation template",
+      partiallyUnresolvedCorrelation,
+      "contains an unresolved template"
+    ),
+    ...correlationSetupFailClosedChecks(
+      "empty resolved correlation",
+      emptyCorrelation,
+      "resolved to an empty string"
+    ),
+    ...correlationSetupFailClosedChecks(
+      "null resolved correlation",
+      nullCorrelation,
+      "contains an unresolved template"
+    ),
+    ...correlationSetupFailClosedChecks(
+      "object resolved correlation",
+      objectCorrelation,
+      "must resolve to a string, number, or boolean"
+    ),
+    ...correlationSetupFailClosedChecks(
+      "partial template with object correlation",
+      partialObjectCorrelation,
+      "must resolve to a string, number, or boolean"
+    ),
+    ...correlationSetupFailClosedChecks(
+      "partial template with array correlation",
+      partialArrayCorrelation,
+      "must resolve to a string, number, or boolean"
+    ),
+    ...correlationSetupFailClosedChecks(
+      "partial template with empty correlation",
+      partialEmptyCorrelation,
+      "resolved to an empty string"
+    ),
+    ...correlationSetupFailClosedChecks(
+      "partial template with whitespace correlation",
+      partialWhitespaceCorrelation,
+      "resolved to an empty string"
+    ),
+    ...correlationSetupFailClosedChecks(
+      "empty template delimiters",
+      emptyTemplateDelimiters,
+      "contains an unresolved template"
+    ),
+    {
+      label: "literal placeholder cannot bypass correlation after setup rejection",
+      pass:
+        literalBypass.status === "error" &&
+        literalBypass.trace.eventCount === 0 &&
+        unresolvedCorrelation.pendingSnapshot === null &&
+        !directLiteralBypass.valid &&
+        directLiteralBypass.errors.some((error) =>
+          error.includes("contains an unresolved template")
+        ),
+      detail:
+        `status=${literalBypass.status}, traceEvents=${literalBypass.trace.eventCount}, ` +
+        `pending=${Boolean(unresolvedCorrelation.pendingSnapshot)}, ` +
+        `directValidation=${JSON.stringify(directLiteralBypass)}`,
+    },
+    {
+      label: "literal correlation remains compatible",
+      pass:
+        literalCorrelation.output.status === "waiting_external_event" &&
+        literalCorrelation.output.pendingExternalEvent?.correlationKey === "ORDER_LITERAL" &&
+        literalCorrelation.pendingSnapshot?.pendingKind === "external_event",
+      detail: JSON.stringify(literalCorrelation.output.pendingExternalEvent ?? null),
+    },
+    {
+      label: "resolved template correlation remains compatible",
+      pass:
+        resolvedTemplateCorrelation.output.status === "waiting_external_event" &&
+        resolvedTemplateCorrelation.output.pendingExternalEvent?.correlationKey ===
+          "tenant/ORDER_10086" &&
+        resolvedTemplateCorrelation.pendingSnapshot?.pendingKind === "external_event",
+      detail: JSON.stringify(resolvedTemplateCorrelation.output.pendingExternalEvent ?? null),
+    },
+    {
+      label: "omitted correlation remains compatible",
+      pass:
+        omittedCorrelation.output.status === "waiting_external_event" &&
+        omittedCorrelation.output.pendingExternalEvent?.correlationKey === undefined &&
+        omittedCorrelation.pendingSnapshot?.pendingKind === "external_event",
+      detail: JSON.stringify(omittedCorrelation.output.pendingExternalEvent ?? null),
+    },
+    {
+      label: "legacy snapshot with unresolved correlation is rejected on restore",
+      pass:
+        unresolvedRestoreError?.includes("contains an unresolved template") === true &&
+        !actorRuntime.hasRun(literalCorrelation.output.actorRunId),
+      detail: unresolvedRestoreError ?? "restore unexpectedly succeeded",
+    },
+    {
+      label: "legacy snapshot with empty correlation is rejected on restore",
+      pass:
+        emptyRestoreError?.includes("resolved to an empty string") === true &&
+        !actorRuntime.hasRun(literalCorrelation.output.actorRunId),
+      detail: emptyRestoreError ?? "restore unexpectedly succeeded",
+    },
+    {
+      label: "legacy partial-template snapshot with object token is rejected",
+      pass:
+        partialObjectRestoreError?.includes(
+          "must resolve to a string, number, or boolean"
+        ) === true && !actorRuntime.hasRun(literalCorrelation.output.actorRunId),
+      detail: partialObjectRestoreError ?? "restore unexpectedly succeeded",
+    },
+    {
+      label: "legacy partial-template snapshot with array token is rejected",
+      pass:
+        partialArrayRestoreError?.includes(
+          "must resolve to a string, number, or boolean"
+        ) === true && !actorRuntime.hasRun(literalCorrelation.output.actorRunId),
+      detail: partialArrayRestoreError ?? "restore unexpectedly succeeded",
+    },
+    {
+      label: "legacy partial-template snapshot with empty token is rejected",
+      pass:
+        partialEmptyRestoreError?.includes("resolved to an empty string") === true &&
+        !actorRuntime.hasRun(literalCorrelation.output.actorRunId),
+      detail: partialEmptyRestoreError ?? "restore unexpectedly succeeded",
+    },
+    {
+      label: "legacy partial-template snapshot with whitespace token is rejected",
+      pass:
+        partialWhitespaceRestoreError?.includes("resolved to an empty string") === true &&
+        !actorRuntime.hasRun(literalCorrelation.output.actorRunId),
+      detail: partialWhitespaceRestoreError ?? "restore unexpectedly succeeded",
     },
   ];
 

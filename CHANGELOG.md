@@ -8,9 +8,9 @@ README is the project entry point. Version history, verification coverage, and r
 
 ## Current State / 当前状态
 
-Current version: `v0.5.0 — Organization Runtime Foundation`
+Current version: `v0.5.1 — Governance Fail-Closed`
 
-当前版本：`v0.5.0 — Organization Runtime Foundation`
+当前版本：`v0.5.1 — Governance Fail-Closed`
 
 | Boundary / 边界 | Status / 状态 |
 |---|---|
@@ -19,7 +19,8 @@ Current version: `v0.5.0 — Organization Runtime Foundation`
 | Organization Recovery | OrganizationSnapshot persists Registry, Task Queue, Inbox, Organization Trace, PendingRunSnapshot, and organization/run-partitioned Memory / Trace state; restore preflight validates canonical Actor, Skill, Tool, Task, PendingRun, and Trace consistency. / OrganizationSnapshot 可持久化 Registry、Task Queue、Inbox、Organization Trace、PendingRunSnapshot 与分区 Memory / Trace；恢复 preflight 会校验 canonical Actor、Skill、Tool、Task、PendingRun 与 Trace 一致性。 |
 | Actor Kernel | Single-Actor loop supports ToolCall, tool approval, Skill wait_approval, human input, external event waiting, continue, Trace lifecycle, memory crystallization, store-backed runs, persistent Trace snapshots, persistent pending runs, coordinated recovery bundles, process-boundary recovery validation, and external event safety checks. / 单 Actor 闭环已支持 ToolCall、工具审批、Skill wait_approval、human input、external event waiting、continue、Trace 生命周期、记忆沉淀、Store-backed run、Trace 快照持久化、pending run 持久化、组合恢复包、进程边界恢复验证与外部事件安全校验。 |
 | Waiting / Resume | Human input, Skill approval, ToolCall approval, and external events validate before resume; invalid continuations preserve pending state for a valid retry. / human input、Skill approval、ToolCall approval 与 external event 都在 resume 前校验；非法 continuation 会保留 pending state 供合法重试。 |
-| External Event Safety | External events validate request id, event name, required correlation key, and lightweight payload schema before resume; invalid events preserve the pending run for retry. / 外部事件在 resume 前会校验 request id、event name、必需的 correlation key 与轻量 payload schema；非法事件会保留 pending run 供后续重试。 |
+| Tool Governance | Only `beforeCall` approval is implemented; Tool definitions declaring `afterCall` or `beforeWriteback` fail registration before any executor can run. / 当前只实现 `beforeCall` 审批；声明 `afterCall` 或 `beforeWriteback` 的 Tool 会在任何 executor 执行前注册失败。 |
+| External Event Safety | Configured correlation keys and every interpolation token must resolve to non-empty scalars without unresolved templates before suspension; incoming events then validate request id, event name, correlation, and payload schema. / 已声明的 correlation 及其每个插值 token 都必须在 suspend 前解析为无残留模板的非空标量；入站事件随后校验 request id、event name、correlation 与 payload schema。 |
 | Runtime Recovery | `RuntimeRecoveryBundle` coordinates PendingRunSnapshot, TraceSnapshot, and MemorySnapshot across all waiting kinds, including validated external events. / `RuntimeRecoveryBundle` 协调 PendingRunSnapshot、TraceSnapshot、MemorySnapshot，并覆盖通过校验的 external event 等待边界。 |
 | Skill Runtime | Strict step parsing, transform execution, human_input waiting, wait_approval waiting, wait_external_event waiting, return output mapping, and explicit unsupported-step errors are available. / 已支持严格 step 解析、transform 执行、human_input 等待、wait_approval 等待、wait_external_event 等待、return output mapping、未支持步骤显式报错。 |
 
@@ -43,12 +44,37 @@ Current version: `v0.5.0 — Organization Runtime Foundation`
 | `npm run demo:recovery:bundle` | Runtime Recovery Bundle demo, 30 checks / Runtime Recovery Bundle Demo，30 条验收 |
 | `npm run demo:recovery:cross-process` | Cross-process Recovery demo, 24 checks / 跨进程恢复 Demo，24 条验收 |
 | `npm run demo:external:event` | External Event Runtime demo, 15 checks / External Event Runtime Demo，15 条验收 |
-| `npm run demo:external:event:validation` | External Event Validation demo, 25 checks / External Event Validation Demo，25 条验收 |
+| `npm run demo:external:event:validation` | External Event Validation demo, 65 checks / External Event Validation Demo，65 条验收 |
+| `npm run demo:tool:approval:fail-closed` | Tool Approval Fail-Closed demo, 15 checks / Tool Approval Fail-Closed Demo，15 条验收 |
 | `npm run demo:continuation:validation` | Retry-safe continuation demo, 81 checks / Retry-safe continuation Demo，81 条验收 |
 | `npm run demo:organization` | Organization Runtime demo, 32 checks / Organization Runtime Demo，32 条验收 |
 | `npm run demo:organization:recovery` | Organization Recovery demo, 42 checks / Organization Recovery Demo，42 条验收 |
 | `npm run demo:organization:pending:recovery` | Four pending kinds recovery demo, 21 checks / 四类 pending 恢复 Demo，21 条验收 |
 | `npm run demo:organization:lifecycle` | In-flight lifecycle hardening demo, 19 checks / 运行中生命周期加固 Demo，19 条验收 |
+
+---
+
+## v0.5.1 — Governance Fail-Closed
+
+- Reject Tool definitions that declare the unimplemented `afterCall` or `beforeWriteback` approval stages, including empty or mixed-stage policies; only `beforeCall` is currently executable.
+- Perform definition, executor, and JSON-safe request preflight before `tool_call_start`, so rejected definitions and malformed requests cannot produce false execution lifecycle events.
+- Require every configured external-event correlation key and each interpolation token to resolve before suspension to a non-empty string, number, or boolean with no unresolved template delimiters.
+- Fail the Actor run before allocating a request id, creating a pending run, or recording `external_event_requested` / `actor_run_suspended` when correlation setup is unsafe.
+- Revalidate correlation resolution during PendingRun restore, so unsafe v0.5.0 v2 checkpoints fail closed without a schema-version bump.
+- Preserve compatibility for literal correlation keys, fully resolved templates, and Skills that omit correlation.
+- Expand External Event Validation from 25 to 65 checks and add 15 Tool Approval Fail-Closed checks. The 21 CI demos now cover 502 checks.
+- Synchronize package / lockfile / Docker Compose metadata at v0.5.1.
+
+中文：
+
+- Tool 声明尚未实现的 `afterCall` 或 `beforeWriteback` 审批阶段时直接拒绝注册，包括空策略和与 `beforeCall` 混合的策略；当前只有 `beforeCall` 可执行。
+- Definition、executor 与 JSON-safe request preflight 都发生在 `tool_call_start` 之前，因此不受支持的治理配置和畸形请求都不会留下虚假的执行生命周期事件。
+- 已声明的 external-event correlation 及其每个插值 token 都必须在 suspend 前解析为非空 string / number / boolean，并且不能残留模板占位符。
+- correlation 配置不安全时，在分配 request id、创建 pending run、记录 `external_event_requested` 或 `actor_run_suspended` 之前终止 Actor run。
+- PendingRun 恢复会重新校验 correlation 解析，因此不安全的 v0.5.0 v2 checkpoint 会在不升级 schema 的前提下 fail closed。
+- 字面 correlation、完整解析的模板以及未声明 correlation 的 Skill 保持兼容。
+- External Event Validation 从 25 条扩展到 65 条，并新增 15 条 Tool Approval Fail-Closed 验收；21 个 CI Demo 共覆盖 502 条检查。
+- package、lockfile 与 Docker Compose 元数据同步到 v0.5.1。
 
 ---
 

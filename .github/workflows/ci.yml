@@ -74,6 +74,9 @@ jobs:
       - name: External Event Validation Demo
         run: npm run demo:external:event:validation
 
+      - name: Tool Approval Fail-Closed Demo
+        run: npm run demo:tool:approval:fail-closed
+
       - name: Continuation Validation Demo
         run: npm run demo:continuation:validation
 
