@@ -8,16 +8,12 @@ import { ActorConfig } from "../core/types/actor";
 import {
   Skill,
   SkillConfig,
-  SkillStep,
-  SkillStepConfig,
   ToolCallStep,
   LLMJudgeStep,
-  ReturnStep,
   TransformStep,
   HumanInputStep,
   WaitApprovalStep,
   WaitExternalEventStep,
-  EndStep,
 } from "../core/types/skill";
 import { ToolCallRequest } from "../core/types/tool";
 import type { ApprovalDecision, ApprovalRequest } from "../core/types/approval";
@@ -56,9 +52,21 @@ import {
   type PendingToolApprovalSnapshot,
   type PendingToolExecutionSnapshot,
 } from "./pending-run-snapshot";
+import { buildInitialSkillContext, parseSkillConfig } from "./runtime-skill-config";
+import { assertPendingRunSnapshot } from "./pending-run-validation";
+import { toolGateway } from "../tools/tool-gateway";
+import { validateToolArguments } from "../tools/tool-schema-validation";
+import { assertPendingToolGovernance } from "./pending-tool-governance-validation";
+import { assertActorConfig } from "./actor-config-validation";
+import {
+  claimStandaloneOrganizationRun,
+  releaseStandaloneOrganizationRun,
+} from "../organization/organization-operation-lease";
 
 export interface ActorRuntimeOptions {
   memoryStore?: MemoryStore;
+  /** Internal token used when an OrganizationRuntime owns this partition. */
+  organizationOwnerToken?: symbol;
 }
 
 export interface ActorRunInput {
@@ -120,129 +128,121 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+const APPROVAL_DECISIONS = new Set<ApprovalDecision["decision"]>([
+  "approve",
+  "reject",
+  "approve_with_modified_arguments",
+  "approve_with_modified_result_view",
+  "approve_with_comment",
+  "request_more_info",
+  "escalate",
+  "cancel",
+]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function requiredString(config: SkillStepConfig, key: string): string {
-  const value = config[key];
-  if (typeof value !== "string" || value.length === 0) {
-    throw new Error(`Skill step ${config.step_key} (${config.type}) requires string field: ${key}`);
-  }
-  return value;
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
-function optionalString(config: SkillStepConfig, key: string): string | undefined {
-  const value = config[key];
-  if (value === undefined) return undefined;
-  if (typeof value !== "string") {
-    throw new Error(`Skill step ${config.step_key} (${config.type}) field ${key} must be a string`);
-  }
-  return value;
+function describeUnknown(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
 }
 
-function requiredMapping(config: SkillStepConfig, key: string): Record<string, string> {
-  const value = config[key];
-  if (!isRecord(value)) {
-    throw new Error(`Skill step ${config.step_key} (${config.type}) requires mapping field: ${key}`);
+function jsonSafetyError(
+  value: unknown,
+  path: string,
+  ancestors = new Set<object>()
+): string | null {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return null;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? null : `${path} must contain finite numbers`;
   }
-  for (const [mappingKey, mappingValue] of Object.entries(value)) {
-    if (typeof mappingValue !== "string") {
-      throw new Error(`Skill step ${config.step_key} (${config.type}) mapping ${key}.${mappingKey} must be a string`);
+  if (typeof value !== "object") return `${path} is not JSON-safe`;
+  if (ancestors.has(value)) return `${path} contains a circular reference`;
+
+  ancestors.add(value);
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index++) {
+      if (!(index in value)) return `${path}[${index}] is a sparse array entry`;
+      const error = jsonSafetyError(value[index], `${path}[${index}]`, ancestors);
+      if (error) return error;
+    }
+  } else {
+    if (!isPlainRecord(value) || Object.getOwnPropertySymbols(value).length > 0) {
+      return `${path} must be a plain JSON object`;
+    }
+    for (const [key, item] of Object.entries(value)) {
+      const error = jsonSafetyError(item, `${path}.${key}`, ancestors);
+      if (error) return error;
     }
   }
-  return value as Record<string, string>;
+  ancestors.delete(value);
+  return null;
 }
 
-function optionalMapping(config: SkillStepConfig, key: string): Record<string, string> | undefined {
-  const value = config[key];
-  if (value === undefined) return undefined;
-  if (!isRecord(value)) {
-    throw new Error(`Skill step ${config.step_key} (${config.type}) field ${key} must be a mapping`);
+interface CanonicalActorRunInput {
+  actorConfig: ActorConfig;
+  skill: Skill;
+  input: ActorRunInput["input"];
+  runtimeContext: Record<string, unknown>;
+}
+
+function validateActorRunPreflight(input: ActorRunInput): CanonicalActorRunInput {
+  assertActorConfig(input.actorConfig);
+
+  const skillJsonError = jsonSafetyError(input.skillConfig, "skillConfig");
+  if (skillJsonError) throw new Error(skillJsonError);
+  const skill = parseSkillConfig(input.skillConfig, input.actorConfig.actor_id);
+  if (skill.ownerActorId !== input.actorConfig.actor_id) {
+    throw new Error(
+      `Skill ${skill.skillId} is owned by ${skill.ownerActorId}, not ${input.actorConfig.actor_id}`
+    );
   }
-  for (const [mappingKey, mappingValue] of Object.entries(value)) {
-    if (typeof mappingValue !== "string") {
-      throw new Error(`Skill step ${config.step_key} (${config.type}) mapping ${key}.${mappingKey} must be a string`);
+  if (!(input.actorConfig.permissions.allowed_skills ?? []).includes(skill.skillId)) {
+    throw new Error(
+      `Skill ${skill.skillId} is not allowed for Actor ${input.actorConfig.actor_id}`
+    );
+  }
+
+  if (!isPlainRecord(input.input)) {
+    throw new Error("input must be a plain object");
+  }
+  for (const field of Object.keys(input.input)) {
+    if (field !== "text" && field !== "payload") {
+      throw new Error(`Unsupported Actor input field: ${field}`);
     }
   }
-  return value as Record<string, string>;
-}
-
-function parseSkillStep(config: SkillStepConfig): SkillStep {
-  const base = {
-    stepKey: config.step_key,
-    description: optionalString(config, "description"),
-  };
-
-  switch (config.type) {
-    case "tool_call":
-      return {
-        ...base,
-        type: "tool_call",
-        toolName: requiredString(config, "tool_name"),
-        inputMapping: requiredMapping(config, "input_mapping"),
-        outputKey: requiredString(config, "output_key"),
-      } as ToolCallStep;
-    case "llm_judge":
-      return {
-        ...base,
-        type: "llm_judge",
-        instruction: requiredString(config, "instruction"),
-        outputKey: requiredString(config, "output_key"),
-        outputSchema: isRecord(config.output_schema) ? config.output_schema : undefined,
-      } as LLMJudgeStep;
-    case "transform":
-      return {
-        ...base,
-        type: "transform",
-        mapping: requiredMapping(config, "mapping"),
-        outputKey: requiredString(config, "output_key"),
-      } as TransformStep;
-    case "return":
-      return {
-        ...base,
-        type: "return",
-        outputMapping: optionalMapping(config, "output_mapping"),
-      } as ReturnStep;
-    case "human_input":
-      return {
-        ...base,
-        type: "human_input",
-        prompt: requiredString(config, "prompt"),
-        outputKey: requiredString(config, "output_key"),
-      } as HumanInputStep;
-    case "wait_approval":
-      return {
-        ...base,
-        type: "wait_approval",
-        approvalRequestId: optionalString(config, "approval_request_id"),
-        reason: requiredString(config, "reason"),
-        outputKey: requiredString(config, "output_key"),
-      } as WaitApprovalStep;
-    case "wait_external_event":
-      return {
-        ...base,
-        type: "wait_external_event",
-        eventName: requiredString(config, "event_name"),
-        correlationKey: optionalString(config, "correlation_key"),
-        reason: optionalString(config, "reason"),
-        outputKey: requiredString(config, "output_key"),
-        eventSchema: isRecord(config.event_schema) ? config.event_schema : undefined,
-      } as WaitExternalEventStep;
-    case "end":
-      return { ...base, type: "end" } as EndStep;
-    default:
-      throw new Error(`Unsupported skill step type: ${String(config.type)} at step ${config.step_key}`);
+  if (input.input.text !== undefined && typeof input.input.text !== "string") {
+    throw new Error("input.text must be a string when present");
   }
-}
+  if (input.input.payload !== undefined && !isPlainRecord(input.input.payload)) {
+    throw new Error("input.payload must be a plain object when present");
+  }
+  const inputJsonError = jsonSafetyError(input.input, "input");
+  if (inputJsonError) throw new Error(inputJsonError);
 
-function parseSkill(config: SkillConfig, actorId: string): Skill {
+  const runtimeContext = input.runtimeContext ?? {};
+  if (!isPlainRecord(runtimeContext)) {
+    throw new Error("runtimeContext must be a plain object");
+  }
+  const runtimeContextJsonError = jsonSafetyError(runtimeContext, "runtimeContext");
+  if (runtimeContextJsonError) throw new Error(runtimeContextJsonError);
+
+  // Detach all execution-bearing data before claim/await. The parsed Skill
+  // retains mappings and schemas from its config, so clone it as well.
   return {
-    skillId: config.skill_id,
-    name: config.name,
-    description: config.description,
-    ownerActorId: config.owner_actor_id ?? actorId,
-    steps: config.steps.map(parseSkillStep),
+    actorConfig: cloneJson(input.actorConfig),
+    skill: cloneJson(skill),
+    input: cloneJson(input.input),
+    runtimeContext: cloneJson(runtimeContext),
   };
 }
 
@@ -255,6 +255,16 @@ export class ActorRuntime {
     pendingSkillApproval?: SkillApprovalRequest;
     pendingExternalEvent?: ExternalEventRequest;
   }> = new Map();
+  private continuationTails: Map<string, Promise<void>> = new Map();
+
+  hasRun(actorRunId: string): boolean {
+    return Boolean(
+      this.runs.has(actorRunId) ||
+      actorDecisionExecutor.getRun(actorRunId) ||
+      approvalGate.getPending(actorRunId) ||
+      this.continuationTails.has(actorRunId)
+    );
+  }
 
   dumpPendingRun(actorRunId: string): PendingRunSnapshot | null {
     const saved = this.runs.get(actorRunId);
@@ -291,7 +301,7 @@ export class ActorRuntime {
 
     if (!pendingKind) return null;
 
-    return cloneJson({
+    const snapshot = cloneJson({
       schemaVersion: PENDING_RUN_SNAPSHOT_SCHEMA_VERSION,
       savedAt: new Date().toISOString(),
       actorRunId,
@@ -307,74 +317,149 @@ export class ActorRuntime {
       pendingExternalEvent: saved.pendingExternalEvent,
       pendingToolApproval,
     } as PendingRunSnapshot);
+    assertPendingRunSnapshot(snapshot);
+    return snapshot;
   }
 
-  restorePendingRun(snapshot: PendingRunSnapshot): void {
-    if (snapshot.schemaVersion !== PENDING_RUN_SNAPSHOT_SCHEMA_VERSION) {
-      throw new Error("Unsupported PendingRunSnapshot schemaVersion: " + String(snapshot.schemaVersion));
+  restorePendingRun(
+    snapshot: PendingRunSnapshot,
+    options: Pick<ActorRuntimeOptions, "organizationOwnerToken"> = {}
+  ): void {
+    assertPendingRunSnapshot(snapshot);
+    assertPendingToolGovernance(snapshot);
+    if (
+      this.hasRun(snapshot.actorRunId)
+    ) {
+      throw new Error(`Actor run ${snapshot.actorRunId} already exists`);
+    }
+    const organizationId = snapshot.context.actor.organizationId;
+    if (
+      !claimStandaloneOrganizationRun(
+        organizationId,
+        snapshot.actorRunId,
+        options.organizationOwnerToken
+      )
+    ) {
+      throw new Error(`Organization ${organizationId} is owned by OrganizationRuntime`);
     }
 
-    const restored = cloneJson(snapshot);
-    restored.state.status = restored.status;
+    try {
+      const restored = cloneJson(snapshot);
+      restored.state.status = restored.status;
 
-    this.runs.set(restored.actorRunId, {
-      skill: restored.skill,
-      state: restored.state,
-      context: restored.context,
-      pendingHumanInput: restored.pendingHumanInput,
-      pendingSkillApproval: restored.pendingSkillApproval,
-      pendingExternalEvent: restored.pendingExternalEvent,
-    });
+      this.runs.set(restored.actorRunId, {
+        skill: restored.skill,
+        state: restored.state,
+        context: restored.context,
+        pendingHumanInput: restored.pendingHumanInput,
+        pendingSkillApproval: restored.pendingSkillApproval,
+        pendingExternalEvent: restored.pendingExternalEvent,
+      });
 
-    const pendingToolExec = restored.pendingToolApproval?.pendingExec;
-    const restoredPendingExec = pendingToolExec ? ({
-      ...pendingToolExec,
-      context: restored.context,
-      state: restored.state,
-    } as PendingExecution) : null;
+      const pendingToolExec = restored.pendingToolApproval?.pendingExec;
+      const restoredPendingExec = pendingToolExec ? ({
+        ...pendingToolExec,
+        context: restored.context,
+        state: restored.state,
+      } as PendingExecution) : null;
 
-    actorDecisionExecutor.registerRun({
-      actorRunId: restored.actorRunId,
-      actorId: restored.actorId,
-      context: restored.context,
-      state: restored.state,
-      pendingExec: restoredPendingExec,
-    });
+      actorDecisionExecutor.registerRun({
+        actorRunId: restored.actorRunId,
+        actorId: restored.actorId,
+        context: restored.context,
+        state: restored.state,
+        pendingExec: restoredPendingExec,
+      });
 
-    if (restored.pendingToolApproval) {
-      approvalGate.restorePending(restored.actorRunId, restored.pendingToolApproval.approvalRequest);
+      if (restored.pendingToolApproval) {
+        approvalGate.restorePending(restored.actorRunId, restored.pendingToolApproval.approvalRequest);
+      }
+    } catch (error) {
+      this.runs.delete(snapshot.actorRunId);
+      actorDecisionExecutor.removeRun(snapshot.actorRunId);
+      approvalGate.clearPending(snapshot.actorRunId);
+      releaseStandaloneOrganizationRun(organizationId, snapshot.actorRunId);
+      throw error;
     }
   }
 
   clearRun(actorRunId: string): void {
+    const saved = this.runs.get(actorRunId);
+    if (!saved) {
+      if (actorDecisionExecutor.getRun(actorRunId) || approvalGate.getPending(actorRunId)) {
+        throw new Error(`Actor run ${actorRunId} is owned by another ActorRuntime`);
+      }
+      return;
+    }
+    if (this.continuationTails.has(actorRunId)) {
+      throw new Error(`Actor run ${actorRunId} has an in-flight continuation`);
+    }
     this.runs.delete(actorRunId);
     actorDecisionExecutor.removeRun(actorRunId);
     approvalGate.clearPending(actorRunId);
+    releaseStandaloneOrganizationRun(saved.context.actor.organizationId, actorRunId);
   }
 
   async run(input: ActorRunInput): Promise<ActorRunOutput> {
     const actorRunId = `arun_${randomUUID()}`;
-    const actorId = input.actorConfig.actor_id;
+    const receivedActorId = typeof input?.actorConfig?.actor_id === "string"
+      ? input.actorConfig.actor_id
+      : "invalid_actor";
+    const receivedSkillId = typeof input?.skillConfig?.skill_id === "string"
+      ? input.skillConfig.skill_id
+      : "invalid_skill";
+    let canonical: CanonicalActorRunInput;
+    try {
+      canonical = validateActorRunPreflight(input);
+    } catch (error) {
+      traceLogger.startRun(
+        actorRunId,
+        receivedActorId || "invalid_actor",
+        receivedSkillId || "invalid_skill"
+      );
+      traceLogger.record(actorRunId, "error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      traceLogger.endRun(actorRunId, "error");
+      return this.buildOutput(actorRunId, "error", null);
+    }
+
+    const { actorConfig, skill, runtimeContext } = canonical;
+    const actorId = actorConfig.actor_id;
+    const organizationId = actorConfig.organization_id ?? "org_default";
     const memoryStore = input.runtimeOptions?.memoryStore;
-    traceLogger.startRun(actorRunId, actorId, input.skillConfig.skill_id);
+    if (
+      !claimStandaloneOrganizationRun(
+        organizationId,
+        actorRunId,
+        input.runtimeOptions?.organizationOwnerToken
+      )
+    ) {
+      throw new Error(`Organization ${organizationId} is owned by OrganizationRuntime`);
+    }
+    traceLogger.startRun(actorRunId, actorId, skill.skillId);
 
     try {
-      const memoryLoaded = await loadRuntimeMemoryStore(actorRunId, memoryStore);
+      const memoryLoaded = await loadRuntimeMemoryStore(actorRunId, organizationId, memoryStore);
       if (!memoryLoaded) throw new Error("MemoryStore load failed");
 
-      if (input.actorConfig.memory?.length) {
+      if (actorConfig.memory.length) {
         memoryService.initActorMemory(
-          { actorId, organizationId: input.actorConfig.organization_id ?? "org_default",
-            unitId: input.actorConfig.unit_id, type: input.actorConfig.type,
-            name: input.actorConfig.name, role: input.actorConfig.role,
-            responsibility: input.actorConfig.responsibility,
-            autonomyLevel: input.actorConfig.autonomy_level as "L2_read_and_draft", status: "active" },
-          input.actorConfig.memory
+          { actorId, organizationId,
+            unitId: actorConfig.unit_id, type: actorConfig.type,
+            name: actorConfig.name, role: actorConfig.role,
+            responsibility: actorConfig.responsibility,
+            autonomyLevel: actorConfig.autonomy_level as "L2_read_and_draft", status: "active" },
+          actorConfig.memory
         );
       }
 
-      const skill = parseSkill(input.skillConfig, actorId);
-      const context = actorContextBuilder.build(input.actorConfig, input.input, input.runtimeContext ?? {}, actorRunId);
+      const context = actorContextBuilder.build(
+        actorConfig,
+        canonical.input,
+        runtimeContext,
+        actorRunId
+      );
       traceLogger.record(actorRunId, "context_built", {
         actorId, skillId: skill.skillId,
         memoryCount: context.memory.actorPrivate.length,
@@ -384,11 +469,10 @@ export class ActorRuntime {
         availableToolCount: context.availableTools.length,
       });
 
-      const state = skillRuntime.initState(skill, {
-        context: { order_id: input.runtimeContext?.order_id ?? "ORDER_10086",
-          customer_id: input.runtimeContext?.customer_id ?? "C001", ...input.runtimeContext },
-        ...input.input.payload, ...input.runtimeContext,
-      });
+      const state = skillRuntime.initState(
+        skill,
+        buildInitialSkillContext(canonical.input, runtimeContext)
+      );
 
       actorDecisionExecutor.registerRun({ actorRunId, actorId, context, state, pendingExec: null });
       this.runs.set(actorRunId, { skill, state, context, memoryStore });
@@ -398,20 +482,301 @@ export class ActorRuntime {
       traceLogger.endRun(actorRunId, "error");
       actorDecisionExecutor.removeRun(actorRunId);
       this.runs.delete(actorRunId);
+      releaseStandaloneOrganizationRun(organizationId, actorRunId);
       return this.buildOutput(actorRunId, "error", null);
     }
   }
 
   private endErroredContinue(actorRunId: string, state: SkillState, message: string): ActorRunOutput {
+    const organizationId = this.runs.get(actorRunId)?.context.actor.organizationId;
     traceLogger.record(actorRunId, "error", { message });
     state.status = "error";
     traceLogger.endRun(actorRunId, "error");
+    approvalGate.clearPending(actorRunId);
     actorDecisionExecutor.removeRun(actorRunId);
     this.runs.delete(actorRunId);
+    if (organizationId) releaseStandaloneOrganizationRun(organizationId, actorRunId);
     return this.buildOutput(actorRunId, "error", null);
   }
 
+  private receivedContinuationMetadata(event: unknown): {
+    receivedEventType: string;
+    receivedRequestId?: string;
+  } {
+    if (!isRecord(event)) return { receivedEventType: "invalid" };
+    const receivedEventType = typeof event.type === "string" ? event.type : "invalid";
+    const body =
+      receivedEventType === "human_input_response"
+        ? event.response
+        : receivedEventType === "approval_decision"
+          ? event.decision
+          : receivedEventType === "external_event_received"
+            ? event.event
+            : undefined;
+    if (!isRecord(body)) return { receivedEventType };
+    const requestId =
+      receivedEventType === "human_input_response"
+        ? body.humanInputRequestId
+        : receivedEventType === "approval_decision"
+          ? body.approvalRequestId
+          : body.externalEventRequestId;
+    return {
+      receivedEventType,
+      ...(typeof requestId === "string" ? { receivedRequestId: requestId } : {}),
+    };
+  }
+
+  private rejectInvalidContinuation(
+    pending: PendingRunSnapshot,
+    event: unknown,
+    validationErrors: string[]
+  ): ActorRunOutput {
+    const received = this.receivedContinuationMetadata(event);
+    const expectedRequestId =
+      pending.pendingHumanInput?.humanInputRequestId ??
+      pending.pendingSkillApproval?.approvalRequestId ??
+      pending.pendingToolApproval?.approvalRequest.approvalRequestId ??
+      pending.pendingExternalEvent?.externalEventRequestId;
+
+    traceLogger.record(pending.actorRunId, "continuation_validation_failed", {
+      pendingKind: pending.pendingKind,
+      receivedEventType: received.receivedEventType,
+      expectedRequestId,
+      ...(received.receivedRequestId
+        ? { receivedRequestId: received.receivedRequestId }
+        : {}),
+      validationErrors,
+    });
+    return this.buildOutput(pending.actorRunId, pending.status, null);
+  }
+
+  private validateApprovalDecision(
+    pending: PendingRunSnapshot,
+    value: unknown
+  ): string[] {
+    if (!isRecord(value)) return ["Approval decision must be an object"];
+
+    const errors: string[] = [];
+    const allowedFields = new Set([
+      "approvalRequestId",
+      "decision",
+      "modifiedArguments",
+      "modifiedResultView",
+      "comment",
+      "decidedBy",
+      "decidedAt",
+    ]);
+    for (const field of Object.keys(value)) {
+      if (!allowedFields.has(field)) errors.push(`Unsupported approval decision field: ${field}`);
+    }
+    const decisionJsonError = jsonSafetyError(value, "decision");
+    if (decisionJsonError) errors.push(decisionJsonError);
+    if (typeof value.approvalRequestId !== "string" || value.approvalRequestId.length === 0) {
+      errors.push("approvalRequestId must be a non-empty string");
+    }
+    if (typeof value.decision !== "string" || !APPROVAL_DECISIONS.has(value.decision as ApprovalDecision["decision"])) {
+      errors.push(`Unsupported approval decision: ${describeUnknown(value.decision)}`);
+    }
+    if (typeof value.decidedAt !== "string" || value.decidedAt.length === 0) {
+      errors.push("decidedAt must be a non-empty string");
+    }
+    for (const field of ["comment", "decidedBy"] as const) {
+      if (value[field] !== undefined && typeof value[field] !== "string") {
+        errors.push(`${field} must be a string when present`);
+      }
+    }
+
+    const decision = value.decision;
+    const capturedPolicy = pending.pendingToolApproval?.approvalRequest.policy;
+    if (pending.pendingKind === "tool_approval") {
+      if (decision === "reject" && capturedPolicy?.allowReject !== true) {
+        errors.push("Pending Tool approval policy does not allow rejection");
+      }
+      if (
+        (decision === "approve_with_comment" || value.comment !== undefined) &&
+        capturedPolicy?.allowComment !== true
+      ) {
+        errors.push("Pending Tool approval policy does not allow comments");
+      }
+    }
+    const hasModifiedArguments = value.modifiedArguments !== undefined;
+    if (hasModifiedArguments) {
+      if (!isPlainRecord(value.modifiedArguments)) {
+        errors.push("modifiedArguments must be a plain object");
+      } else {
+        const jsonError = jsonSafetyError(value.modifiedArguments, "modifiedArguments");
+        if (jsonError) errors.push(jsonError);
+      }
+      if (decision !== "approve_with_modified_arguments") {
+        errors.push("modifiedArguments requires approve_with_modified_arguments");
+      }
+    }
+    if (value.modifiedResultView !== undefined || decision === "approve_with_modified_result_view") {
+      errors.push("approve_with_modified_result_view is not valid for a before-call approval");
+    }
+
+    if (decision === "approve_with_modified_arguments") {
+      if (pending.pendingKind !== "tool_approval") {
+        errors.push("approve_with_modified_arguments is only valid for Tool approval");
+      }
+      if (!hasModifiedArguments) {
+        errors.push("approve_with_modified_arguments requires modifiedArguments");
+      }
+      const toolName = pending.pendingToolApproval?.approvalRequest.toolName;
+      const toolDefinition = toolName ? toolGateway.getDefinition(toolName) : undefined;
+      if (capturedPolicy?.allowModifyArguments !== true) {
+        errors.push(`Tool ${toolName ?? "unknown"} does not allow argument modification`);
+      }
+      if (isPlainRecord(value.modifiedArguments)) {
+        errors.push(...validateToolArguments(value.modifiedArguments, toolDefinition?.inputSchema));
+      }
+    }
+
+    return errors;
+  }
+
+  private validateContinuation(
+    pending: PendingRunSnapshot,
+    event: unknown
+  ): string[] {
+    if (!isRecord(event)) return ["Continuation event must be an object"];
+    const expectedEventType =
+      pending.pendingKind === "human_input"
+        ? "human_input_response"
+        : pending.pendingKind === "external_event"
+          ? "external_event_received"
+          : "approval_decision";
+    if (event.type !== expectedEventType) {
+      return [`Expected ${expectedEventType} for ${pending.pendingKind}, received ${describeUnknown(event.type)}`];
+    }
+    const bodyField =
+      expectedEventType === "human_input_response"
+        ? "response"
+        : expectedEventType === "approval_decision"
+          ? "decision"
+          : "event";
+    const envelopeErrors = Object.keys(event)
+      .filter((field) => field !== "type" && field !== bodyField)
+      .map((field) => `Unsupported continuation event field: ${field}`);
+    const eventJsonError = jsonSafetyError(event, "event");
+    if (eventJsonError) envelopeErrors.push(eventJsonError);
+
+    if (pending.pendingKind === "human_input") {
+      if (!isRecord(event.response)) return ["Human input response must be an object"];
+      const errors: string[] = [...envelopeErrors];
+      const allowedFields = new Set([
+        "humanInputRequestId",
+        "value",
+        "respondedBy",
+        "respondedAt",
+      ]);
+      for (const field of Object.keys(event.response)) {
+        if (!allowedFields.has(field)) errors.push(`Unsupported human input response field: ${field}`);
+      }
+      if (
+        typeof event.response.humanInputRequestId !== "string" ||
+        pending.pendingHumanInput?.humanInputRequestId !== event.response.humanInputRequestId
+      ) {
+        errors.push("Human input request id mismatch");
+      }
+      if (!("value" in event.response)) {
+        errors.push("Human input response requires value");
+      } else {
+        const jsonError = jsonSafetyError(event.response.value, "response.value");
+        if (jsonError) errors.push(jsonError);
+      }
+      for (const field of ["respondedBy", "respondedAt"] as const) {
+        if (event.response[field] !== undefined && typeof event.response[field] !== "string") {
+          errors.push(`${field} must be a string when present`);
+        }
+      }
+      return errors;
+    }
+
+    if (pending.pendingKind === "skill_approval" || pending.pendingKind === "tool_approval") {
+      const errors = [
+        ...envelopeErrors,
+        ...this.validateApprovalDecision(pending, event.decision),
+      ];
+      if (pending.pendingKind === "tool_approval") {
+        try {
+          assertPendingToolGovernance(pending);
+        } catch (error) {
+          errors.push(error instanceof Error ? error.message : String(error));
+        }
+      }
+      if (isRecord(event.decision)) {
+        const expectedRequestId =
+          pending.pendingSkillApproval?.approvalRequestId ??
+          pending.pendingToolApproval?.approvalRequest.approvalRequestId;
+        if (event.decision.approvalRequestId !== expectedRequestId) {
+          errors.push(`${pending.pendingKind === "skill_approval" ? "Skill" : "Tool"} approval request id mismatch`);
+        }
+      }
+      return errors;
+    }
+
+    if (!isRecord(event.event)) return ["External event must be an object"];
+    const errors: string[] = [...envelopeErrors];
+    const allowedFields = new Set([
+      "externalEventRequestId",
+      "eventName",
+      "correlationKey",
+      "payload",
+      "receivedBy",
+      "receivedAt",
+    ]);
+    for (const field of Object.keys(event.event)) {
+      if (!allowedFields.has(field)) errors.push(`Unsupported external event field: ${field}`);
+    }
+    for (const field of ["externalEventRequestId", "eventName"] as const) {
+      if (typeof event.event[field] !== "string" || event.event[field].length === 0) {
+        errors.push(`${field} must be a non-empty string`);
+      }
+    }
+    if (!("payload" in event.event)) {
+      errors.push("External event requires payload");
+    } else {
+      const jsonError = jsonSafetyError(event.event.payload, "event.payload");
+      if (jsonError) errors.push(jsonError);
+    }
+    for (const field of ["correlationKey", "receivedBy", "receivedAt"] as const) {
+      if (event.event[field] !== undefined && typeof event.event[field] !== "string") {
+        errors.push(`${field} must be a string when present`);
+      }
+    }
+    return errors;
+  }
+
   async continue(actorRunId: string, event: ActorContinueEvent): Promise<ActorRunOutput> {
+    const previous = this.continuationTails.get(actorRunId) ?? Promise.resolve();
+    let release!: () => void;
+    const slot = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.catch(() => undefined).then(() => slot);
+    this.continuationTails.set(actorRunId, tail);
+
+    await previous.catch(() => undefined);
+    try {
+      try {
+        return await this.continueUnlocked(actorRunId, event);
+      } catch (error) {
+        const saved = this.runs.get(actorRunId);
+        if (!saved) throw error;
+        return this.endErroredContinue(
+          actorRunId,
+          saved.state,
+          `Continuation failed: ${error instanceof Error ? error.message : describeUnknown(error)}`
+        );
+      }
+    } finally {
+      release();
+      if (this.continuationTails.get(actorRunId) === tail) {
+        this.continuationTails.delete(actorRunId);
+      }
+    }
+  }
+
+  private async continueUnlocked(actorRunId: string, event: ActorContinueEvent): Promise<ActorRunOutput> {
     const saved = this.runs.get(actorRunId);
     if (!saved) {
       return { actorRunId, status: "error", result: null, toolCalls: [], approvals: [], memoryCandidates: [],
@@ -420,14 +785,19 @@ export class ActorRuntime {
 
     const { context, state, skill, memoryStore } = saved;
     const actorId = context.actor.actorId;
+    const pending = this.dumpPendingRun(actorRunId);
+    if (pending) {
+      const validationErrors = this.validateContinuation(pending, event);
+      if (validationErrors.length > 0) {
+        return this.rejectInvalidContinuation(pending, event, validationErrors);
+      }
+      // Detach live execution state from caller-owned objects after validation.
+      event = cloneJson(event);
+    }
 
     if (event.type === "approval_decision") {
       if (saved.pendingSkillApproval) {
         const pending = saved.pendingSkillApproval;
-        if (pending.approvalRequestId !== event.decision.approvalRequestId) {
-          return this.endErroredContinue(actorRunId, state, `Skill approval response id mismatch: ${event.decision.approvalRequestId}`);
-        }
-
         traceLogger.resumeRun(actorRunId, { resumedBy: "approval_decision", waitingKind: "skill_approval", requestId: pending.approvalRequestId, stepKey: pending.stepKey });
         applySkillApprovalDecision(pending, event.decision, state, actorRunId);
         saved.pendingSkillApproval = undefined;
@@ -442,11 +812,18 @@ export class ActorRuntime {
       }
 
       traceLogger.resumeRun(actorRunId, { resumedBy: "approval_decision", waitingKind: "tool_approval", requestId: event.decision.approvalRequestId });
-      const execResult = await actorDecisionExecutor.continueAfterApproval(actorRunId, event.decision);
+      let execResult;
+      try {
+        execResult = await actorDecisionExecutor.continueAfterApproval(actorRunId, event.decision);
+      } catch (error) {
+        return this.endErroredContinue(
+          actorRunId,
+          state,
+          `Tool approval continuation failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
       if (execResult.outcome === "error") {
-        state.status = "error";
-        traceLogger.endRun(actorRunId, "error");
-        return this.buildOutput(actorRunId, "error", null);
+        return this.endErroredContinue(actorRunId, state, execResult.reason);
       }
       if (execResult.outcome === "completed") {
         state.status = "running";
@@ -457,8 +834,8 @@ export class ActorRuntime {
 
     if (event.type === "human_input_response") {
       const pending = saved.pendingHumanInput;
-      if (!pending || pending.humanInputRequestId !== event.response.humanInputRequestId) {
-        const message = pending ? `Human input response id mismatch: ${event.response.humanInputRequestId}` : `No pending human input for ${actorRunId}`;
+      if (!pending) {
+        const message = `No pending human input for ${actorRunId}`;
         return this.endErroredContinue(actorRunId, state, message);
       }
 
@@ -583,7 +960,7 @@ export class ActorRuntime {
         }
         case "waiting_approval": {
           state.status = "waiting_approval";
-          traceLogger.suspendRun(actorRunId, "waiting_approval", { waitingKind: "tool_approval", requestId: execResult.approvalRequest.approvalRequestId, toolName: execResult.approvalRequest.toolName, reason: execResult.approvalRequest.reason });
+          traceLogger.suspendRun(actorRunId, "waiting_approval", { waitingKind: "tool_approval", requestId: execResult.approvalRequest.approvalRequestId, stepKey: step.stepKey, toolName: execResult.approvalRequest.toolName, reason: execResult.approvalRequest.reason });
           return this.buildOutput(actorRunId, "waiting_approval", null, execResult.approvalRequest);
         }
         case "final_output": {
@@ -624,7 +1001,11 @@ export class ActorRuntime {
 
     traceLogger.record(actorRunId, "memory_write_summary", memoryGeneration.summary as unknown as Record<string, unknown>);
 
-    const memorySaved = await saveRuntimeMemoryStore(actorRunId, memoryStore);
+    const memorySaved = await saveRuntimeMemoryStore(
+      actorRunId,
+      context.actor.organizationId,
+      memoryStore
+    );
     if (!memorySaved) state.status = "error";
 
     const endStatus: "completed" | "error" = state.status === "completed" ? "completed" : "error";
@@ -632,6 +1013,7 @@ export class ActorRuntime {
 
     actorDecisionExecutor.removeRun(actorRunId);
     this.runs.delete(actorRunId);
+    releaseStandaloneOrganizationRun(context.actor.organizationId, actorRunId);
 
     return this.buildOutput(actorRunId, endStatus, finalResult, undefined, memoryCandidates);
   }
@@ -681,7 +1063,7 @@ export class ActorRuntime {
         };
       });
 
-    return {
+    return cloneJson({
       actorRunId, status, result,
       pendingApproval: pendingApproval ? this.buildPendingApprovalOutput(pendingApproval) : undefined,
       pendingHumanInput,
@@ -693,7 +1075,7 @@ export class ActorRuntime {
         actorRunId, eventCount: trace.events.length,
         events: trace.events.map((e) => ({ type: e.eventType, stepKey: e.stepKey })),
       },
-    };
+    });
   }
 }
 

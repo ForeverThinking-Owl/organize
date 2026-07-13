@@ -4,6 +4,7 @@
 // v0.4.4: SkillState 支持 waiting_external_event
 // ============================================================================
 
+import { randomUUID } from "node:crypto";
 import {
   Skill,
   SkillStep,
@@ -102,7 +103,7 @@ export function buildToolCallRequest(
   }
 
   return {
-    toolCallId: `tc_${step.stepKey}_${Date.now()}`,
+    toolCallId: `tc_${randomUUID()}`,
     toolName: step.toolName,
     arguments: resolvedArgs,
     actorId,

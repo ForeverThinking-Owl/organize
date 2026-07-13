@@ -74,8 +74,17 @@ jobs:
       - name: External Event Validation Demo
         run: npm run demo:external:event:validation
 
+      - name: Continuation Validation Demo
+        run: npm run demo:continuation:validation
+
       - name: Organization Runtime Demo
         run: npm run demo:organization
 
       - name: Organization Recovery Demo
         run: npm run demo:organization:recovery
+
+      - name: Organization Pending Recovery Demo
+        run: npm run demo:organization:pending:recovery
+
+      - name: Organization Lifecycle Hardening Demo
+        run: npm run demo:organization:lifecycle

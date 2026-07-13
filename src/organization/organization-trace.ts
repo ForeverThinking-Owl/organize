@@ -1,22 +1,25 @@
 import { randomUUID } from "node:crypto";
 
-export type OrganizationTraceEventType =
-  | "organization_created"
-  | "actor_registered"
-  | "permission_denied"
-  | "task_created"
-  | "task_assigned"
-  | "task_queued"
-  | "task_run_started"
-  | "task_suspended"
-  | "task_resumed"
-  | "task_completed"
-  | "task_failed"
-  | "message_enqueued"
-  | "message_delivered"
-  | "message_acknowledged"
-  | "snapshot_created"
-  | "snapshot_restored";
+export const ORGANIZATION_TRACE_EVENT_TYPES = [
+  "organization_created",
+  "actor_registered",
+  "permission_denied",
+  "task_created",
+  "task_assigned",
+  "task_queued",
+  "task_run_started",
+  "task_suspended",
+  "task_resumed",
+  "task_completed",
+  "task_failed",
+  "message_enqueued",
+  "message_delivered",
+  "message_acknowledged",
+  "snapshot_created",
+  "snapshot_restored",
+] as const;
+
+export type OrganizationTraceEventType = typeof ORGANIZATION_TRACE_EVENT_TYPES[number];
 
 export interface OrganizationTraceEvent {
   eventId: string;

@@ -40,7 +40,7 @@ OrganizationSnapshot：按组织保存 Registry、Task、Inbox、Trace 与 pendi
 v0.5.0 — Organization Runtime Foundation
 ```
 
-当前版本在可靠的单 Actor Runtime 之上新增真正的组织编排层：组织隔离的 Actor Registry、能力校验、不可变 Task 状态机、单 Runtime 原子队列 claim、ActorRuntime `run / continue` 调度、FIFO Actor Inbox、组织级 Trace，以及可持久化的 OrganizationSnapshot。等待中的组织任务会保存 PendingRunSnapshot，并按 organizationId / actorRunId 分区恢复 Memory 与 Trace；Actor run 使用 UUID，恢复一个组织不会覆盖另一个组织。
+当前版本在可靠的单 Actor Runtime 之上新增真正的组织编排层：组织隔离的 Actor Registry、能力校验、不可变 Task 状态机、单 Runtime 原子队列 claim、ActorRuntime `run / continue` 调度、FIFO Actor Inbox、组织级 Trace，以及可持久化的 OrganizationSnapshot。四类 continuation 都会在 resume 前完成校验，非法事件保留 pending run 供合法事件重试；恢复会把 Snapshot 中的执行状态与 Registry、Task、Tool 和 Trace 做完整 preflight。Actor run 使用 UUID，恢复一个组织不会覆盖另一个组织。
 
 版本历史、验收矩阵、CI 覆盖和下一步计划见 [CHANGELOG.md](./CHANGELOG.md)。
 
@@ -80,8 +80,11 @@ npm run demo:recovery:bundle       # Runtime Recovery Bundle Demo
 npm run demo:recovery:cross-process # Cross-process Recovery Demo
 npm run demo:external:event        # External Event Runtime Demo
 npm run demo:external:event:validation # External Event Validation Demo
+npm run demo:continuation:validation # Retry-safe Continuation Validation Demo
 npm run demo:organization          # Organization Runtime Demo
 npm run demo:organization:recovery # Organization Snapshot / Recovery Demo
+npm run demo:organization:pending:recovery # Four Pending Kinds Recovery Demo
+npm run demo:organization:lifecycle # In-flight Clear Protection Demo
 npm run typecheck                  # TypeScript type-check
 npm run build                      # Compile
 ```
@@ -105,10 +108,18 @@ OrganizationRuntime
 - 首个 Actor 必须持有 `organization:manage`，后续 Actor 只能由已有 manager 注册，避免自授予权限。
 - Skill 必须属于目标 Actor，并出现在 `allowed_skills` 中。
 - Task 与 Message API 强制检查组织能力；跨 Actor Inbox 读取需要 `organization:manage`。
-- Human input、approval 与 external event continuation 分别校验执行、审批与事件接收能力；审批者不能批准自己的任务运行，审计身份由已认证 Actor 写入。
+- Human input、approval 与 external event continuation 分别校验执行、审批与事件接收能力；审批者不能批准自己的任务运行。`requestedByActorId` 等调用身份必须由可信宿主认证后传入，Capability 负责授权而不负责身份认证。
+- Human input、Skill approval、Tool approval 与 External event 都在 resume / consume 前校验 event type 与 request ID；非法 continuation 不结束运行、不消费审批，并允许合法重试。
 - TaskManager 与 Inbox 返回深拷贝，后续状态变化不会改写历史快照。
-- 恢复先完整校验 Registry、Queue、Inbox、Task ↔ PendingRun ↔ Trace 绑定，再提交目标组织的 Memory、Trace 与 pending runs；失败时回滚全局恢复状态。
-- `JsonOrganizationStore` 在单实例内串行化写入并使用临时文件原子替换；多个进程同时写同一文件仍需由部署层提供锁或单写者约束。
+- 恢复先完整校验 Registry、Queue、Inbox、Task ↔ PendingRun ↔ canonical Actor/Skill/Tool policy ↔ Trace 绑定，再提交目标组织的 Memory、Trace 与 pending runs；失败时回滚全局恢复状态。
+- PendingRun、RuntimeRecoveryBundle 与 Organization snapshot/store 使用 v2 schema；缺少 Tool policy fingerprint 的 v1 Tool-approval checkpoint 会安全拒绝。
+- `runtimeOptions.memoryStore` 按当前 organization 分区 merge / save，不覆盖同进程其他组织或同组织并发 pending run。
+- Tool approval 固化 policy fingerprint；Tool 定义、请求与 observation 在边界深拷贝并校验 identity、JSON shape 与 output schema。
+- Snapshot preflight 提供结构与内部一致性校验，不提供加密真实性；将快照放在不可信存储时仍需要由部署层提供签名或完整性保护。
+- `clearOrganization()` 是可信宿主生命周期 API；存在 in-flight dispatch / continue 时会拒绝清理，避免产生 orphan Actor run。
+- OrganizationRuntime ownership 是进程内状态；宿主卸载组织时必须显式调用 `clearOrganization()` 释放。
+- 所有 JSON Store 在单实例内串行化写入并使用临时文件原子替换；多个实例或进程共享同一文件仍需由部署层提供锁或单写者约束。
+- Recovery 是 at-least-once：Tool executor 必须按 snapshot 中稳定的 `toolCallId` 去重，checkpoint 推进/删除由宿主管理；崩溃安全的 exactly-once 需要 transactional outbox 或持久幂等存储。
 - Message payload、外部事件 payload 和完整 runtimeContext 不写入 Organization Trace。
 
 ## External Event Safety
@@ -191,7 +202,9 @@ MemorySnapshot → TraceSnapshot → PendingRunSnapshot
 v0.5.0 — Organization Runtime Foundation
 ```
 
-This version introduces a real organization layer above ActorRuntime: organization-scoped actor registries, capability enforcement, immutable task lifecycles, single-runtime atomic queue claims, ActorRuntime dispatch/continue bindings, FIFO inboxes, organization traces, and persistent organization recovery snapshots. Pending Actor runs, Memory, and Trace are restored by organization/run partition, while UUID run IDs prevent cross-process collisions.
+This version introduces a real organization layer above ActorRuntime: organization-scoped actor registries, capability enforcement, immutable task lifecycles, single-runtime atomic queue claims, ActorRuntime dispatch/continue bindings, FIFO inboxes, organization traces, and persistent organization recovery snapshots. All four continuation kinds validate before resume and preserve pending runs after invalid input. Recovery validates snapshot execution state against canonical Actor, Skill, Tool, Task, and Trace state before commit, while UUID run IDs prevent cross-process collisions. Caller actor IDs must come from a trusted host authentication boundary; runtime capabilities provide authorization, not authentication.
+
+Recovery is at-least-once. Tool executors must durably deduplicate the stable snapshot `toolCallId`, and the host owns checkpoint advancement/deletion; crash-safe exactly-once delivery requires a transactional outbox or durable idempotency store. JSON stores serialize atomic replacement only within one instance, so shared multi-instance/process files require an external lock or single writer. PendingRun, RuntimeRecoveryBundle, and Organization checkpoint schemas are v2 and reject unsafe v1 Tool-approval checkpoints that lack a policy fingerprint.
 
 ## Verification Scripts
 
@@ -211,8 +224,11 @@ npm run demo:recovery:bundle
 npm run demo:recovery:cross-process
 npm run demo:external:event
 npm run demo:external:event:validation
+npm run demo:continuation:validation
 npm run demo:organization
 npm run demo:organization:recovery
+npm run demo:organization:pending:recovery
+npm run demo:organization:lifecycle
 npm run typecheck
 npm run build
 ```

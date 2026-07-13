@@ -4,21 +4,11 @@
 // v0.4.1: allow pending approval restore for persistent pending runs
 // ============================================================================
 
-import {
-  ApprovalRequest,
-  ApprovalDecision,
-  ApprovalStage,
-} from "../core/types/approval";
+import { randomUUID } from "node:crypto";
+import { ApprovalRequest, ApprovalDecision } from "../core/types/approval";
 import { ToolCallRequest, ToolDefinition } from "../core/types/tool";
 import { traceLogger } from "../trace/trace-logger";
-
-let approvalCounter = 0;
-
-function counterFromApprovalId(approvalRequestId: string): number | null {
-  if (!approvalRequestId.startsWith("appr_")) return null;
-  const n = Number(approvalRequestId.slice("appr_".length));
-  return Number.isInteger(n) ? n : null;
-}
+import { buildCanonicalToolApprovalMetadata } from "./tool-approval-policy";
 
 export class ApprovalGate {
   /** 待审批请求（按 actorRunId 索引） */
@@ -32,92 +22,52 @@ export class ApprovalGate {
     request: ToolCallRequest,
     toolDef: ToolDefinition
   ): ApprovalRequest | null {
-    const policy = toolDef.approvalPolicy;
-    if (!policy || !policy.beforeCall?.requiredWhen) {
-      return null;
-    }
+    const metadata = buildCanonicalToolApprovalMetadata(toolDef, request.arguments);
+    if (!metadata) return null;
 
-    // 检查每条审批规则
-    for (const condition of policy.beforeCall.requiredWhen) {
-      const argValue = request.arguments[condition.field];
-      let matches = false;
+    const approvalRequest: ApprovalRequest = {
+      approvalRequestId: `appr_${randomUUID()}`,
+      toolCallId: request.toolCallId,
+      toolName: request.toolName,
+      ...metadata,
+      status: "pending",
+      createdAt: new Date().toISOString(),
+    };
 
-      switch (condition.operator) {
-        case "==":
-          matches = argValue === condition.value;
-          break;
-        case "!=":
-          matches = argValue !== condition.value;
-          break;
-        case ">":
-          matches = (argValue as number) > (condition.value as number);
-          break;
-        case ">=":
-          matches = (argValue as number) >= (condition.value as number);
-          break;
-        case "<":
-          matches = (argValue as number) < (condition.value as number);
-          break;
-        case "<=":
-          matches = (argValue as number) <= (condition.value as number);
-          break;
-      }
+    traceLogger.record(request.actorRunId, "approval_check", {
+      required: true,
+      toolName: request.toolName,
+      reason: approvalRequest.reason,
+      approvalRequestId: approvalRequest.approvalRequestId,
+    });
 
-      if (matches) {
-        const approvalRequest: ApprovalRequest = {
-          approvalRequestId: `appr_${++approvalCounter}`,
-          toolCallId: request.toolCallId,
-          toolName: request.toolName,
-          stage: "before_call" as ApprovalStage,
-          riskLevel: toolDef.riskLevel,
-          reason: `Tool ${request.toolName} 参数 ${condition.field} ${condition.operator} ${condition.value} 触发审批`,
-          proposedArguments: request.arguments,
-          suggestedApproverRole: "customer_service_manager",
-          status: "pending",
-          createdAt: new Date().toISOString(),
-        };
+    traceLogger.record(request.actorRunId, "approval_requested", {
+      approvalRequestId: approvalRequest.approvalRequestId,
+      toolCallId: approvalRequest.toolCallId,
+      toolName: approvalRequest.toolName,
+      stage: approvalRequest.stage,
+      reason: approvalRequest.reason,
+      proposedArguments: approvalRequest.proposedArguments,
+    });
 
-        traceLogger.record(request.actorRunId, "approval_check", {
-          required: true,
-          toolName: request.toolName,
-          reason: approvalRequest.reason,
-          approvalRequestId: approvalRequest.approvalRequestId,
-        });
-
-        traceLogger.record(request.actorRunId, "approval_requested", {
-          approvalRequestId: approvalRequest.approvalRequestId,
-          toolCallId: approvalRequest.toolCallId,
-          toolName: approvalRequest.toolName,
-          stage: approvalRequest.stage,
-          reason: approvalRequest.reason,
-          proposedArguments: approvalRequest.proposedArguments,
-        });
-
-        // 记录为待审批
-        this.pendingApprovals.set(request.actorRunId, approvalRequest);
-        return approvalRequest;
-      }
-    }
-
-    return null;
+    // 记录为待审批
+    this.pendingApprovals.set(request.actorRunId, approvalRequest);
+    return approvalRequest;
   }
 
   /**
    * 获取待审批请求
    */
   getPending(actorRunId: string): ApprovalRequest | undefined {
-    return this.pendingApprovals.get(actorRunId);
+    const pending = this.pendingApprovals.get(actorRunId);
+    return pending ? structuredClone(pending) : undefined;
   }
 
   /**
    * v0.4.1: 从 PendingRunSnapshot 恢复待审批请求。
    */
   restorePending(actorRunId: string, approvalRequest: ApprovalRequest): void {
-    this.pendingApprovals.set(actorRunId, approvalRequest);
-    const counter = counterFromApprovalId(approvalRequest.approvalRequestId);
-    if (counter !== null && counter > approvalCounter) {
-      approvalCounter = counter;
-    }
+    this.pendingApprovals.set(actorRunId, structuredClone(approvalRequest));
   }
 
   /**
@@ -176,7 +126,6 @@ export class ApprovalGate {
 
   clear(): void {
     this.pendingApprovals.clear();
-    approvalCounter = 0;
   }
 }
 

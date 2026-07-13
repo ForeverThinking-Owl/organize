@@ -171,6 +171,18 @@ async function main() {
     console.log("  MemoryWriteSummary: " + JSON.stringify(repeatSummary));
     console.log();
 
+    const olderConcurrentSnapshot = structuredClone(storedSnapshot!);
+    olderConcurrentSnapshot.savedAt = "2026-01-01T00:00:00.000Z";
+    const newerConcurrentSnapshot = memoryService.dumpSnapshot();
+    newerConcurrentSnapshot.savedAt = "2026-01-02T00:00:00.000Z";
+    await Promise.all([
+      store.save(olderConcurrentSnapshot),
+      store.save(newerConcurrentSnapshot),
+    ]);
+    const concurrentStoredSnapshot = await store.load();
+    const concurrentSavesPreserveCallOrder =
+      concurrentStoredSnapshot?.savedAt === newerConcurrentSnapshot.savedAt;
+
     console.log("🗑️ 清空 Store：JsonMemoryStore.clear()");
     await store.clear();
     const afterClearLoad = await store.load();
@@ -214,6 +226,11 @@ async function main() {
         detail: "before=" + beforeRepeatCount + ", after=" + afterRepeatCount,
       },
       {
+        label: "JsonMemoryStore 同实例并发 save 按调用顺序提交",
+        pass: concurrentSavesPreserveCallOrder,
+        detail: String(concurrentSavesPreserveCallOrder),
+      },
+      {
         label: "store.clear 后 load 返回 null",
         pass: afterClearLoad === null,
         detail: "afterClearLoad=" + String(afterClearLoad),
@@ -221,7 +238,7 @@ async function main() {
     ];
 
     console.log("=".repeat(60));
-    console.log("  ✅ Memory Store Abstraction 验收检查 (8 条)");
+    console.log(`  ✅ Memory Store Abstraction 验收检查 (${checks.length} 条)`);
     console.log("=".repeat(60));
 
     let passCount = 0;

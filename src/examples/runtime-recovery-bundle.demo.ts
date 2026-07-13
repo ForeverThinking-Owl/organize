@@ -16,8 +16,16 @@ import {
 import { traceLogger } from "../trace/trace-logger";
 import { memoryService } from "../memory/memory-service";
 import { approvalGate } from "../approvals/approval-gate";
-import { JsonRuntimeRecoveryStore } from "../runtime/json-runtime-recovery-store";
-import { createRuntimeRecoveryBundle, restoreRuntimeRecoveryBundle, type RuntimeRecoveryBundle } from "../runtime/runtime-recovery-bundle";
+import {
+  assertRuntimeRecoveryStoreSnapshot,
+  JsonRuntimeRecoveryStore,
+} from "../runtime/json-runtime-recovery-store";
+import {
+  RUNTIME_RECOVERY_STORE_SCHEMA_VERSION,
+  createRuntimeRecoveryBundle,
+  restoreRuntimeRecoveryBundle,
+  type RuntimeRecoveryBundle,
+} from "../runtime/runtime-recovery-bundle";
 import { saveRuntimeRecoveryBundle, loadRuntimeRecoveryBundle, deleteRuntimeRecoveryBundle } from "../runtime/runtime-recovery-persistence";
 import type { TraceEvent } from "../core/types/trace";
 
@@ -111,6 +119,7 @@ interface ScenarioResult {
   listCountAfterDelete: number;
   memoryCountAfterRestore: number;
   traceEventCountAfterRestore: number;
+  unrelatedStatePreserved: boolean;
   hasResumed: boolean;
   hasCompletedEnd: boolean;
 }
@@ -174,26 +183,45 @@ async function persistClearRestore(
   listCountAfterDelete: number;
   memoryCountAfterRestore: number;
   traceEventCountAfterRestore: number;
+  unrelatedStatePreserved: boolean;
 }> {
   const bundle = createRuntimeRecoveryBundle(waiting.actorRunId);
   if (!bundle) {
-    return { bundle, loaded: null, listCountAfterSave: 0, listCountAfterDelete: 0, memoryCountAfterRestore: 0, traceEventCountAfterRestore: 0 };
+    return { bundle, loaded: null, listCountAfterSave: 0, listCountAfterDelete: 0, memoryCountAfterRestore: 0, traceEventCountAfterRestore: 0, unrelatedStatePreserved: false };
   }
 
   await saveRuntimeRecoveryBundle(store, bundle);
   const listCountAfterSave = (await store.list()).length;
 
   clearRuntimeEnvironment(waiting.actorRunId);
+  const betaMemory = memoryService.addMemory({
+    organizationId: "org_beta_preserved",
+    actorId: "beta_actor",
+    scope: "actor_private",
+    type: "semantic",
+    content: `preserve-${waiting.actorRunId}`,
+    status: "active",
+  });
+  const betaRunId = `beta_${waiting.actorRunId}`;
+  traceLogger.startRun(betaRunId, "beta_actor", "beta_skill");
+  traceLogger.suspendRun(betaRunId, "waiting_human_input", {
+    waitingKind: "human_input",
+    requestId: `beta_request_${waiting.actorRunId}`,
+  });
   const loaded = await loadRuntimeRecoveryBundle(store, waiting.actorRunId);
   if (loaded) restoreRuntimeRecoveryBundle(loaded);
 
   const memoryCountAfterRestore = memoryService.getStats().memoryCount;
   const traceEventCountAfterRestore = restoredTraceEventCount(waiting.actorRunId);
+  const unrelatedStatePreserved =
+    memoryService.dumpOrganizationSnapshot("org_beta_preserved").memories
+      .some((memory) => memory.memoryId === betaMemory.memoryId) &&
+    traceLogger.getTrace(betaRunId)?.status === "waiting_human_input";
 
   await deleteRuntimeRecoveryBundle(store, waiting.actorRunId);
   const listCountAfterDelete = (await store.list()).length;
 
-  return { bundle, loaded, listCountAfterSave, listCountAfterDelete, memoryCountAfterRestore, traceEventCountAfterRestore };
+  return { bundle, loaded, listCountAfterSave, listCountAfterDelete, memoryCountAfterRestore, traceEventCountAfterRestore, unrelatedStatePreserved };
 }
 
 function traceSummary(completed: ActorRunOutput): { hasResumed: boolean; hasCompletedEnd: boolean } {
@@ -282,6 +310,11 @@ function bundleChecks(result: ScenarioResult, expectedKind: "human_input" | "ski
       detail: `memoryCount=${result.memoryCountAfterRestore}, traceEvents=${result.traceEventCountAfterRestore}`,
     },
     {
+      label: `${result.label}: restore 保留其他 organization 的 Memory / Trace`,
+      pass: result.unrelatedStatePreserved,
+      detail: String(result.unrelatedStatePreserved),
+    },
+    {
       label: `${result.label}: restore 后 continue completed 且 Trace 接续`,
       pass: result.completed.status === "completed" && result.hasResumed && result.hasCompletedEnd,
       detail: `status=${result.completed.status}, hasResumed=${result.hasResumed}, hasCompletedEnd=${result.hasCompletedEnd}`,
@@ -321,6 +354,74 @@ async function main() {
     console.log();
 
     const completedBundle = createRuntimeRecoveryBundle(toolApproval.completed.actorRunId);
+    const baselineMemorySnapshot = memoryService.dumpSnapshot();
+    const baselineMemory = JSON.stringify({
+      memories: baselineMemorySnapshot.memories,
+      candidates: baselineMemorySnapshot.candidates,
+      lastWriteSummary: baselineMemorySnapshot.lastWriteSummary,
+    });
+    const baselineTrace = JSON.stringify(traceLogger.getAllTraces());
+    const mismatchedTraceBundle = structuredClone(human.bundle!);
+    mismatchedTraceBundle.trace.traces[0].actorId = "forged_actor";
+    const startEvent = mismatchedTraceBundle.trace.traces[0].events[0];
+    startEvent.data.actorId = "forged_actor";
+    let mismatchedTraceRejected = false;
+    try {
+      restoreRuntimeRecoveryBundle(mismatchedTraceBundle);
+    } catch {
+      mismatchedTraceRejected = true;
+    }
+    const rejectedBundlePreservedState =
+      baselineMemory === (() => {
+        const current = memoryService.dumpSnapshot();
+        return JSON.stringify({
+          memories: current.memories,
+          candidates: current.candidates,
+          lastWriteSummary: current.lastWriteSummary,
+        });
+      })() &&
+      baselineTrace === JSON.stringify(traceLogger.getAllTraces()) &&
+      actorRuntime.dumpPendingRun(mismatchedTraceBundle.actorRunId) === null;
+    const originalRestorePendingRun = actorRuntime.restorePendingRun;
+    let commitFailureRolledBack = false;
+    actorRuntime.restorePendingRun = () => {
+      throw new Error("injected restore failure");
+    };
+    try {
+      restoreRuntimeRecoveryBundle(structuredClone(human.bundle!));
+    } catch {
+      const currentMemory = memoryService.dumpSnapshot();
+      commitFailureRolledBack =
+        baselineMemory === JSON.stringify({
+          memories: currentMemory.memories,
+          candidates: currentMemory.candidates,
+          lastWriteSummary: currentMemory.lastWriteSummary,
+        }) &&
+        baselineTrace === JSON.stringify(traceLogger.getAllTraces()) &&
+        actorRuntime.dumpPendingRun(human.bundle!.actorRunId) === null;
+    } finally {
+      actorRuntime.restorePendingRun = originalRestorePendingRun;
+    }
+    const betaPreservedAfterFailure =
+      memoryService.dumpOrganizationSnapshot("org_beta_preserved").memories.length > 0 &&
+      traceLogger.getTrace(`beta_${toolApproval.waiting.actorRunId}`)?.status ===
+        "waiting_human_input";
+    let duplicateStoreBundlesRejected = false;
+    try {
+      assertRuntimeRecoveryStoreSnapshot({
+        schemaVersion: RUNTIME_RECOVERY_STORE_SCHEMA_VERSION,
+        savedAt: new Date().toISOString(),
+        bundles: [structuredClone(human.bundle!), structuredClone(human.bundle!)],
+      });
+    } catch {
+      duplicateStoreBundlesRejected = true;
+    }
+    await Promise.all([
+      store.save(structuredClone(human.bundle!)),
+      store.save(structuredClone(skillApproval.bundle!)),
+    ]);
+    const concurrentStoreSavesPreservedBoth = (await store.list()).length === 2;
+    await store.clear();
     const checks: CheckResult[] = [
       {
         label: "human_input run 进入 waiting_human_input",
@@ -355,10 +456,40 @@ async function main() {
         pass: completedBundle === null,
         detail: "completedBundle=" + String(completedBundle),
       },
+      {
+        label: "RecoveryBundle 拒绝与 pending identity 不匹配的 Trace",
+        pass: mismatchedTraceRejected,
+        detail: String(mismatchedTraceRejected),
+      },
+      {
+        label: "RecoveryBundle preflight 失败不修改 Memory / Trace / Run",
+        pass: rejectedBundlePreservedState,
+        detail: String(rejectedBundlePreservedState),
+      },
+      {
+        label: "RecoveryBundle commit 失败回滚 Memory / Trace / Run",
+        pass: commitFailureRolledBack,
+        detail: String(commitFailureRolledBack),
+      },
+      {
+        label: "RecoveryBundle commit 失败仍保留 beta organization",
+        pass: betaPreservedAfterFailure,
+        detail: String(betaPreservedAfterFailure),
+      },
+      {
+        label: "RuntimeRecoveryStore 拒绝重复 actorRunId",
+        pass: duplicateStoreBundlesRejected,
+        detail: String(duplicateStoreBundlesRejected),
+      },
+      {
+        label: "RuntimeRecoveryStore 同实例并发 save 保留两个 bundle",
+        pass: concurrentStoreSavesPreservedBoth,
+        detail: String(concurrentStoreSavesPreservedBoth),
+      },
     ];
 
     console.log("=".repeat(60));
-    console.log("  ✅ Runtime Recovery Bundle 验收检查 (21 条)");
+    console.log(`  ✅ Runtime Recovery Bundle 验收检查 (${checks.length} 条)`);
     console.log("=".repeat(60));
 
     let passCount = 0;

@@ -11,6 +11,17 @@ export type ApprovalStage = "before_call" | "after_call" | "before_writeback";
 /**
  * 审批请求
  */
+export interface ApprovalPolicyBinding {
+  requiredWhen: Array<{
+    field: string;
+    operator: "<=" | ">=" | "<" | ">" | "==" | "!=";
+    value: string | number | boolean;
+  }>;
+  allowModifyArguments: boolean;
+  allowReject: boolean;
+  allowComment: boolean;
+}
+
 export interface ApprovalRequest {
   approvalRequestId: string;
   toolCallId: string;
@@ -22,6 +33,8 @@ export interface ApprovalRequest {
   proposedArguments?: Record<string, unknown>;
   rawResult?: Record<string, unknown>;
   suggestedApproverRole?: string;
+  /** Immutable policy fingerprint captured when the request was created. */
+  policy: ApprovalPolicyBinding;
   status: "pending" | "approved" | "rejected" | "cancelled" | "escalated";
   createdAt: string;
 }

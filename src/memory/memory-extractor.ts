@@ -3,10 +3,9 @@
 // v0.3.3: 从实践运行结果中提取混合记忆候选，支持快照恢复计数器
 // ============================================================================
 
+import { randomUUID } from "node:crypto";
 import { MemoryCandidate } from "../core/types/memory";
 import { ToolObservation } from "../core/types/tool";
-
-let candidateCounter = 0;
 
 export interface MemoryExtractionInput {
   actorRunId: string;
@@ -24,7 +23,7 @@ export interface MemoryExtractionInput {
 function candidate(input: Omit<MemoryCandidate, "candidateId" | "createdAt">): MemoryCandidate {
   return {
     ...input,
-    candidateId: `cand_${++candidateCounter}`,
+    candidateId: `cand_${randomUUID()}`,
     createdAt: new Date().toISOString(),
     status: "candidate",
   };
@@ -181,11 +180,11 @@ export class MemoryExtractor {
   }
 
   reset(): void {
-    candidateCounter = 0;
+    // UUID identifiers require no process-local counter reset.
   }
 
-  setCounter(value: number): void {
-    candidateCounter = Math.max(0, Math.floor(value));
+  setCounter(_value: number): void {
+    // Backward-compatible no-op for callers compiled against the counter API.
   }
 }
 

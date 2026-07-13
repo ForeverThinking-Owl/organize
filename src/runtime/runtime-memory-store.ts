@@ -4,6 +4,7 @@
 // ============================================================================
 
 import type { MemoryStore } from "../memory/memory-store";
+import { assertMemorySnapshot } from "../memory/json-memory-store";
 import { memoryService } from "../memory/memory-service";
 import { traceLogger } from "../trace/trace-logger";
 
@@ -11,11 +12,11 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function memoryStats(): { memoryCount: number; candidateCount: number } {
-  const stats = memoryService.getStats();
+function memoryStats(organizationId: string): { memoryCount: number; candidateCount: number } {
+  const snapshot = memoryService.dumpOrganizationSnapshot(organizationId);
   return {
-    memoryCount: stats.memoryCount,
-    candidateCount: stats.candidateCount,
+    memoryCount: snapshot.memories.length,
+    candidateCount: snapshot.candidates.length,
   };
 }
 
@@ -26,6 +27,7 @@ function memoryStats(): { memoryCount: number; candidateCount: number } {
  */
 export async function loadRuntimeMemoryStore(
   actorRunId: string,
+  organizationId: string,
   store?: MemoryStore
 ): Promise<boolean> {
   if (!store) return true;
@@ -35,17 +37,24 @@ export async function loadRuntimeMemoryStore(
     if (!snapshot) {
       traceLogger.record(actorRunId, "memory_store_load", {
         status: "miss",
-        ...memoryStats(),
+        ...memoryStats(organizationId),
       });
       return true;
     }
 
-    memoryService.restoreSnapshot(snapshot);
+    assertMemorySnapshot(snapshot);
+    const previousPartition = memoryService.dumpOrganizationSnapshot(organizationId);
+    try {
+      memoryService.mergeOrganizationSnapshot(organizationId, snapshot);
+    } catch (error) {
+      memoryService.restoreOrganizationSnapshot(organizationId, previousPartition);
+      throw error;
+    }
     traceLogger.record(actorRunId, "memory_store_load", {
       status: "loaded",
       schemaVersion: snapshot.schemaVersion,
       snapshotSavedAt: snapshot.savedAt,
-      ...memoryStats(),
+      ...memoryStats(organizationId),
     });
     return true;
   } catch (error) {
@@ -65,18 +74,19 @@ export async function loadRuntimeMemoryStore(
  */
 export async function saveRuntimeMemoryStore(
   actorRunId: string,
+  organizationId: string,
   store?: MemoryStore
 ): Promise<boolean> {
   if (!store) return true;
 
   try {
-    const snapshot = memoryService.dumpSnapshot();
+    const snapshot = memoryService.dumpOrganizationSnapshot(organizationId);
     await store.save(snapshot);
     traceLogger.record(actorRunId, "memory_store_save", {
       status: "saved",
       schemaVersion: snapshot.schemaVersion,
       snapshotSavedAt: snapshot.savedAt,
-      ...memoryStats(),
+      ...memoryStats(organizationId),
     });
     return true;
   } catch (error) {

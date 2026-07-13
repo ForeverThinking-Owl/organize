@@ -12,8 +12,8 @@ import type { HumanInputRequest } from "./human-input-runtime";
 import type { SkillState } from "./skill-runtime";
 import type { SkillApprovalRequest } from "./wait-approval-runtime";
 
-export const PENDING_RUN_SNAPSHOT_SCHEMA_VERSION = "pending_run.snapshot.v1";
-export const PENDING_RUN_STORE_SCHEMA_VERSION = "pending_run.store.v1";
+export const PENDING_RUN_SNAPSHOT_SCHEMA_VERSION = "pending_run.snapshot.v2";
+export const PENDING_RUN_STORE_SCHEMA_VERSION = "pending_run.store.v2";
 
 export type PendingRunStatus = "waiting_human_input" | "waiting_approval" | "waiting_external_event";
 export type PendingRunKind = "human_input" | "skill_approval" | "tool_approval" | "external_event";

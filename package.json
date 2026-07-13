@@ -21,8 +21,11 @@
     "demo:recovery:cross-process": "tsx src/examples/cross-process-recovery.demo.ts",
     "demo:external:event": "tsx src/examples/external-event-runtime.demo.ts",
     "demo:external:event:validation": "tsx src/examples/external-event-validation.demo.ts",
+    "demo:continuation:validation": "tsx src/examples/continuation-validation.demo.ts",
     "demo:organization": "tsx src/examples/organization-runtime.demo.ts",
     "demo:organization:recovery": "tsx src/examples/organization-recovery.demo.ts",
+    "demo:organization:pending:recovery": "tsx src/examples/organization-pending-recovery.demo.ts",
+    "demo:organization:lifecycle": "tsx src/examples/organization-lifecycle-hardening.demo.ts",
     "build": "tsc",
     "start:dist": "node dist/examples/customer-after-sales.demo.js",
     "typecheck": "tsc --noEmit"

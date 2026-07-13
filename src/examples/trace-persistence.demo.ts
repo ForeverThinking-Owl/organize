@@ -3,6 +3,7 @@
 // 验证 Trace 持久化：TraceSnapshot + JsonTraceStore + clear/restore 后可复盘
 // ============================================================================
 
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +17,11 @@ import {
 import { traceLogger } from "../trace/trace-logger";
 import { JsonTraceStore } from "../trace/json-trace-store";
 import { loadTraceLogger, saveTraceLogger } from "../trace/trace-persistence";
-import { TRACE_SNAPSHOT_SCHEMA_VERSION } from "../trace/trace-snapshot";
+import {
+  TRACE_SNAPSHOT_SCHEMA_VERSION,
+  assertTraceSnapshot,
+  type TraceSnapshot,
+} from "../trace/trace-snapshot";
 import { memoryService } from "../memory/memory-service";
 import { approvalGate } from "../approvals/approval-gate";
 import type { ActorRunTrace, TraceEvent } from "../core/types/trace";
@@ -129,12 +134,13 @@ function eventSignature(events: TraceEvent[]): string {
     .join("|");
 }
 
-function maxEventCounter(trace: ActorRunTrace): number {
-  return trace.events.reduce((max, event) => {
-    if (!event.eventId.startsWith("evt_")) return max;
-    const n = Number(event.eventId.slice("evt_".length));
-    return Number.isInteger(n) ? Math.max(max, n) : max;
-  }, 0);
+function traceSnapshotRejected(snapshot: TraceSnapshot): boolean {
+  try {
+    assertTraceSnapshot(snapshot);
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 async function main() {
@@ -156,7 +162,7 @@ async function main() {
     const originalTrace = traceLogger.getTrace(output.actorRunId);
     const originalEvents = originalTrace?.events ?? [];
     const originalSignature = eventSignature(originalEvents);
-    const originalMaxEventCounter = originalTrace ? maxEventCounter(originalTrace) : 0;
+    const originalEventIds = new Set(originalEvents.map((event) => event.eventId));
     console.log("  Status: " + output.status);
     console.log("  ActorRunId: " + output.actorRunId);
     console.log("  TraceEvents: " + originalEvents.length);
@@ -183,14 +189,64 @@ async function main() {
     console.log("  RestoredTraceEvents: " + restoredEvents.length);
     console.log();
 
-    console.log("🔂 恢复后继续运行一次，验证 eventId counter 不回退");
+    console.log("🔂 恢复后继续运行一次，验证 eventId UUID 不冲突");
     const afterRestore = await runPractice();
     const afterRestoreTrace = traceLogger.getTrace(afterRestore.actorRunId);
-    const firstNewEventId = afterRestoreTrace?.events[0]?.eventId ?? "evt_0";
-    const firstNewEventCounter = Number(firstNewEventId.replace(/^evt_/, ""));
+    const firstNewEventId = afterRestoreTrace?.events[0]?.eventId ?? "missing";
     console.log("  NewActorRunId: " + afterRestore.actorRunId);
     console.log("  FirstNewEventId: " + firstNewEventId);
     console.log();
+
+    const validationBeforeSuspend = structuredClone(snapshot);
+    const validationTrace = validationBeforeSuspend.traces[0];
+    validationTrace.events.splice(1, 0, {
+      eventId: `evt_${randomUUID()}`,
+      actorRunId: validationTrace.actorRunId,
+      sequence: 2,
+      eventType: "continuation_validation_failed",
+      timestamp: new Date().toISOString(),
+      data: { validationErrors: ["forged running-state validation"] },
+    });
+    validationTrace.events.forEach((event, index) => { event.sequence = index + 1; });
+    const validationBeforeSuspendRejected = traceSnapshotRejected(validationBeforeSuspend);
+
+    const waitingDirectlyEnds = structuredClone(snapshot);
+    const waitingTrace = waitingDirectlyEnds.traces[0];
+    const suspendIndex = waitingTrace.events.findIndex(
+      (event) => event.eventType === "actor_run_suspended"
+    );
+    if (suspendIndex < 0) throw new Error("Expected a suspended lifecycle in Trace demo");
+    waitingTrace.events = waitingTrace.events.slice(0, suspendIndex + 1);
+    waitingTrace.events.push({
+      eventId: `evt_${randomUUID()}`,
+      actorRunId: waitingTrace.actorRunId,
+      sequence: waitingTrace.events.length + 1,
+      eventType: "actor_run_end",
+      timestamp: new Date().toISOString(),
+      data: { status: "error" },
+    });
+    waitingTrace.status = "error";
+    waitingTrace.endedAt = new Date().toISOString();
+    const waitingDirectlyEndsRejected = traceSnapshotRejected(waitingDirectlyEnds);
+
+    const duplicateEventIdsWithinRun = structuredClone(snapshot);
+    duplicateEventIdsWithinRun.traces[0].events[1].eventId =
+      duplicateEventIdsWithinRun.traces[0].events[0].eventId;
+    const duplicateEventIdsWithinRunRejected = traceSnapshotRejected(duplicateEventIdsWithinRun);
+
+    const legacyCrossRunEventIds = structuredClone(snapshot);
+    const duplicateTrace = structuredClone(legacyCrossRunEventIds.traces[0]);
+    duplicateTrace.actorRunId = `${duplicateTrace.actorRunId}_duplicate`;
+    duplicateTrace.events.forEach((event) => { event.actorRunId = duplicateTrace.actorRunId; });
+    legacyCrossRunEventIds.traces.push(duplicateTrace);
+    const legacyCrossRunEventIdsAccepted = !traceSnapshotRejected(legacyCrossRunEventIds);
+
+    const newerSnapshot = traceLogger.dumpSnapshot();
+    await Promise.all([store.save(structuredClone(snapshot)), store.save(newerSnapshot)]);
+    const concurrentlyStored = await store.load();
+    const concurrentTraceSavesPreserveCallOrder =
+      concurrentlyStored?.traces.length === newerSnapshot.traces.length &&
+      concurrentlyStored.traces.some((trace) => trace.actorRunId === afterRestore.actorRunId);
 
     const checks: CheckResult[] = [
       {
@@ -244,23 +300,49 @@ async function main() {
         detail: "loaded=" + loaded + ", restoredActorRunId=" + String(restoredTrace?.actorRunId),
       },
       {
-        label: "恢复后的 Trace 保留 status、事件顺序与 event counter 连续性",
+        label: "恢复后的 Trace 保留顺序且新 eventId 使用不冲突 UUID",
         pass:
           restoredTrace?.status === originalTrace?.status &&
           restoredEvents.length === originalEvents.length &&
           restoredSignature === originalSignature &&
-          firstNewEventCounter > originalMaxEventCounter,
+          /^evt_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(firstNewEventId) &&
+          !originalEventIds.has(firstNewEventId),
         detail:
           "restoredStatus=" + String(restoredTrace?.status) +
           ", events=" + restoredEvents.length +
           ", sameOrder=" + String(restoredSignature === originalSignature) +
-          ", firstNewEventCounter=" + String(firstNewEventCounter) +
-          ", originalMaxEventCounter=" + String(originalMaxEventCounter),
+          ", firstNewEventId=" + firstNewEventId +
+          ", collides=" + String(originalEventIds.has(firstNewEventId)),
+      },
+      {
+        label: "Trace 拒绝 waiting 之前的 continuation validation 事件",
+        pass: validationBeforeSuspendRejected,
+        detail: String(validationBeforeSuspendRejected),
+      },
+      {
+        label: "Trace 拒绝 waiting 未 resume 就直接终止",
+        pass: waitingDirectlyEndsRejected,
+        detail: String(waitingDirectlyEndsRejected),
+      },
+      {
+        label: "TraceSnapshot 拒绝同一 run 内重复 eventId",
+        pass: duplicateEventIdsWithinRunRejected,
+        detail: String(duplicateEventIdsWithinRunRejected),
+      },
+      {
+        label: "TraceSnapshot 接受不同 run 的 legacy eventId 重复",
+        pass: legacyCrossRunEventIdsAccepted,
+        detail: String(legacyCrossRunEventIdsAccepted),
+      },
+      {
+        label: "JsonTraceStore 同实例并发 save 按调用顺序提交",
+        pass: concurrentTraceSavesPreserveCallOrder,
+        detail: String(concurrentTraceSavesPreserveCallOrder),
       },
     ];
 
     console.log("=".repeat(60));
-    console.log("  ✅ Trace Persistence 验收检查 (10 条)");
+    console.log(`  ✅ Trace Persistence 验收检查 (${checks.length} 条)`);
     console.log("=".repeat(60));
 
     let passCount = 0;

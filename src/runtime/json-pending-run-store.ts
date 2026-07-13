@@ -3,15 +3,18 @@
 // v0.4.5: PendingRunStore implementation validates external event waits
 // ============================================================================
 
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
-  PENDING_RUN_SNAPSHOT_SCHEMA_VERSION,
   PENDING_RUN_STORE_SCHEMA_VERSION,
   type PendingRunSnapshot,
   type PendingRunStoreSnapshot,
 } from "./pending-run-snapshot";
+import { assertPendingRunSnapshot } from "./pending-run-validation";
 import type { PendingRunStore } from "./pending-run-store";
+
+export { assertPendingRunSnapshot } from "./pending-run-validation";
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -19,83 +22,6 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function isFileNotFound(error: unknown): boolean {
   return isObject(error) && error.code === "ENOENT";
-}
-
-function assertStringField(value: Record<string, unknown>, key: string, label: string): void {
-  if (typeof value[key] !== "string") {
-    throw new Error(`Invalid ${label}: ${key} must be a string`);
-  }
-}
-
-function assertOptionalStringField(value: Record<string, unknown>, key: string, label: string): void {
-  if (value[key] !== undefined && typeof value[key] !== "string") {
-    throw new Error(`Invalid ${label}: ${key} must be a string when present`);
-  }
-}
-
-function assertObjectField(value: Record<string, unknown>, key: string, label: string): void {
-  if (!isObject(value[key])) {
-    throw new Error(`Invalid ${label}: ${key} must be an object`);
-  }
-}
-
-function assertExternalEventRequest(value: unknown): void {
-  if (!isObject(value)) {
-    throw new Error("Invalid PendingRunSnapshot: pendingExternalEvent must be an object");
-  }
-  assertStringField(value, "externalEventRequestId", "pendingExternalEvent");
-  assertStringField(value, "stepKey", "pendingExternalEvent");
-  assertStringField(value, "eventName", "pendingExternalEvent");
-  assertStringField(value, "outputKey", "pendingExternalEvent");
-  assertOptionalStringField(value, "correlationKey", "pendingExternalEvent");
-  assertOptionalStringField(value, "reason", "pendingExternalEvent");
-  if (value.eventSchema !== undefined && !isObject(value.eventSchema)) {
-    throw new Error("Invalid pendingExternalEvent: eventSchema must be an object when present");
-  }
-}
-
-export function assertPendingRunSnapshot(value: unknown): asserts value is PendingRunSnapshot {
-  if (!isObject(value)) {
-    throw new Error("Invalid PendingRunSnapshot: expected object");
-  }
-  if (value.schemaVersion !== PENDING_RUN_SNAPSHOT_SCHEMA_VERSION) {
-    throw new Error("Invalid PendingRunSnapshot: unsupported schemaVersion " + String(value.schemaVersion));
-  }
-
-  assertStringField(value, "savedAt", "PendingRunSnapshot");
-  assertStringField(value, "actorRunId", "PendingRunSnapshot");
-  assertStringField(value, "actorId", "PendingRunSnapshot");
-  assertStringField(value, "skillId", "PendingRunSnapshot");
-
-  if (value.status !== "waiting_human_input" && value.status !== "waiting_approval" && value.status !== "waiting_external_event") {
-    throw new Error("Invalid PendingRunSnapshot: status must be waiting_human_input, waiting_approval, or waiting_external_event");
-  }
-  if (!["human_input", "skill_approval", "tool_approval", "external_event"].includes(String(value.pendingKind))) {
-    throw new Error("Invalid PendingRunSnapshot: unsupported pendingKind " + String(value.pendingKind));
-  }
-
-  assertObjectField(value, "skill", "PendingRunSnapshot");
-  assertObjectField(value, "state", "PendingRunSnapshot");
-  assertObjectField(value, "context", "PendingRunSnapshot");
-
-  if (value.pendingKind === "human_input") {
-    assertObjectField(value, "pendingHumanInput", "PendingRunSnapshot");
-  }
-  if (value.pendingKind === "skill_approval") {
-    assertObjectField(value, "pendingSkillApproval", "PendingRunSnapshot");
-  }
-  if (value.pendingKind === "tool_approval") {
-    assertObjectField(value, "pendingToolApproval", "PendingRunSnapshot");
-    const toolApproval = value.pendingToolApproval as Record<string, unknown>;
-    assertObjectField(toolApproval, "approvalRequest", "PendingToolApprovalSnapshot");
-    assertObjectField(toolApproval, "pendingExec", "PendingToolApprovalSnapshot");
-  }
-  if (value.pendingKind === "external_event") {
-    if (value.status !== "waiting_external_event") {
-      throw new Error("Invalid PendingRunSnapshot: external_event must use waiting_external_event status");
-    }
-    assertExternalEventRequest(value.pendingExternalEvent);
-  }
 }
 
 export function assertPendingRunStoreSnapshot(value: unknown): asserts value is PendingRunStoreSnapshot {
@@ -111,7 +37,14 @@ export function assertPendingRunStoreSnapshot(value: unknown): asserts value is 
   if (!Array.isArray(value.runs)) {
     throw new Error("Invalid PendingRunStoreSnapshot: runs must be an array");
   }
-  value.runs.forEach(assertPendingRunSnapshot);
+  const actorRunIds = new Set<string>();
+  value.runs.forEach((run) => {
+    assertPendingRunSnapshot(run);
+    if (actorRunIds.has(run.actorRunId)) {
+      throw new Error(`Invalid PendingRunStoreSnapshot: duplicate actorRunId ${run.actorRunId}`);
+    }
+    actorRunIds.add(run.actorRunId);
+  });
 }
 
 function emptyStoreSnapshot(): PendingRunStoreSnapshot {
@@ -125,7 +58,13 @@ function emptyStoreSnapshot(): PendingRunStoreSnapshot {
 export async function savePendingRunStoreSnapshot(filePath: string, snapshot: PendingRunStoreSnapshot): Promise<void> {
   assertPendingRunStoreSnapshot(snapshot);
   await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, JSON.stringify(snapshot, null, 2) + "\n", "utf8");
+  const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, JSON.stringify(snapshot, null, 2) + "\n", "utf8");
+    await rename(temporaryPath, filePath);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
 }
 
 export async function loadPendingRunStoreSnapshot(filePath: string): Promise<PendingRunStoreSnapshot> {
@@ -136,7 +75,19 @@ export async function loadPendingRunStoreSnapshot(filePath: string): Promise<Pen
 }
 
 export class JsonPendingRunStore implements PendingRunStore {
+  private mutationTail: Promise<void> = Promise.resolve();
+
   constructor(private readonly filePath: string) {}
+
+  private enqueueMutation(mutation: () => Promise<void>): Promise<void> {
+    const queued = this.mutationTail.then(mutation);
+    this.mutationTail = queued.catch(() => undefined);
+    return queued;
+  }
+
+  private async waitForMutations(): Promise<void> {
+    await this.mutationTail;
+  }
 
   private async loadStore(): Promise<PendingRunStoreSnapshot> {
     try {
@@ -148,36 +99,46 @@ export class JsonPendingRunStore implements PendingRunStore {
   }
 
   async load(actorRunId: string): Promise<PendingRunSnapshot | null> {
+    await this.waitForMutations();
     const store = await this.loadStore();
-    return store.runs.find((run) => run.actorRunId === actorRunId) ?? null;
+    const run = store.runs.find((item) => item.actorRunId === actorRunId);
+    return run ? structuredClone(run) : null;
   }
 
   async save(snapshot: PendingRunSnapshot): Promise<void> {
     assertPendingRunSnapshot(snapshot);
-    const store = await this.loadStore();
-    const remaining = store.runs.filter((run) => run.actorRunId !== snapshot.actorRunId);
-    await savePendingRunStoreSnapshot(this.filePath, {
-      schemaVersion: PENDING_RUN_STORE_SCHEMA_VERSION,
-      savedAt: new Date().toISOString(),
-      runs: [...remaining, snapshot],
+    const storedSnapshot = structuredClone(snapshot);
+    await this.enqueueMutation(async () => {
+      const store = await this.loadStore();
+      const remaining = store.runs.filter((run) => run.actorRunId !== storedSnapshot.actorRunId);
+      await savePendingRunStoreSnapshot(this.filePath, {
+        schemaVersion: PENDING_RUN_STORE_SCHEMA_VERSION,
+        savedAt: new Date().toISOString(),
+        runs: [...remaining, storedSnapshot],
+      });
     });
   }
 
   async delete(actorRunId: string): Promise<void> {
-    const store = await this.loadStore();
-    await savePendingRunStoreSnapshot(this.filePath, {
-      schemaVersion: PENDING_RUN_STORE_SCHEMA_VERSION,
-      savedAt: new Date().toISOString(),
-      runs: store.runs.filter((run) => run.actorRunId !== actorRunId),
+    await this.enqueueMutation(async () => {
+      const store = await this.loadStore();
+      await savePendingRunStoreSnapshot(this.filePath, {
+        schemaVersion: PENDING_RUN_STORE_SCHEMA_VERSION,
+        savedAt: new Date().toISOString(),
+        runs: store.runs.filter((run) => run.actorRunId !== actorRunId),
+      });
     });
   }
 
   async list(): Promise<PendingRunSnapshot[]> {
+    await this.waitForMutations();
     const store = await this.loadStore();
-    return store.runs;
+    return structuredClone(store.runs);
   }
 
   async clear(): Promise<void> {
-    await rm(this.filePath, { force: true });
+    await this.enqueueMutation(async () => {
+      await rm(this.filePath, { force: true });
+    });
   }
 }

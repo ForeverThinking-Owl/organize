@@ -3,6 +3,7 @@
 // v0.4.5: runtime helpers for wait_external_event waiting / continue semantics
 // ============================================================================
 
+import { randomUUID } from "node:crypto";
 import type { WaitExternalEventStep } from "../core/types/skill";
 import { traceLogger } from "../trace/trace-logger";
 import { resolveTemplateValue, type SkillState } from "./skill-runtime";
@@ -49,7 +50,7 @@ export function buildExternalEventRequest(
   actorRunId: string
 ): ExternalEventRequest {
   const request: ExternalEventRequest = {
-    externalEventRequestId: `evt_wait_${step.stepKey}_${Date.now()}`,
+    externalEventRequestId: `evt_wait_${randomUUID()}`,
     stepKey: step.stepKey,
     eventName: step.eventName,
     correlationKey: optionalResolvedString(step.correlationKey, state),

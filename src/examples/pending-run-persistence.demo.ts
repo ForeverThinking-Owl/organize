@@ -16,9 +16,16 @@ import {
 import { traceLogger } from "../trace/trace-logger";
 import { memoryService } from "../memory/memory-service";
 import { approvalGate } from "../approvals/approval-gate";
-import { JsonPendingRunStore } from "../runtime/json-pending-run-store";
+import {
+  assertPendingRunSnapshot,
+  assertPendingRunStoreSnapshot,
+  JsonPendingRunStore,
+} from "../runtime/json-pending-run-store";
 import { loadPendingRunSnapshot, savePendingRunSnapshot, deletePendingRunSnapshot } from "../runtime/pending-run-persistence";
-import type { PendingRunSnapshot } from "../runtime/pending-run-snapshot";
+import {
+  PENDING_RUN_STORE_SCHEMA_VERSION,
+  type PendingRunSnapshot,
+} from "../runtime/pending-run-snapshot";
 import type { TraceEvent } from "../core/types/trace";
 
 const BASE_ACTOR_CONFIG = {
@@ -173,6 +180,15 @@ function traceSummary(completed: ActorRunOutput): { hasResumed: boolean; hasComp
   };
 }
 
+function snapshotValidationRejects(snapshot: PendingRunSnapshot): boolean {
+  try {
+    assertPendingRunSnapshot(snapshot);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 async function runHumanInputScenario(store: JsonPendingRunStore): Promise<ScenarioResult> {
   resetRuntime();
   const waiting = await actorRuntime.run(runArgs(HUMAN_INPUT_SKILL, "客户需要人工补充意见。"));
@@ -286,6 +302,69 @@ async function main() {
     console.log();
 
     const completedDump = actorRuntime.dumpPendingRun(toolApproval.completed.actorRunId);
+    const corruptedForRuntime = structuredClone(human.snapshot!);
+    corruptedForRuntime.state.skillId = "forged_skill";
+    let directRestoreRejected = false;
+    try {
+      actorRuntime.restorePendingRun(corruptedForRuntime);
+    } catch {
+      directRestoreRejected = actorRuntime.dumpPendingRun(corruptedForRuntime.actorRunId) === null;
+    } finally {
+      actorRuntime.clearRun(corruptedForRuntime.actorRunId);
+    }
+
+    const corruptedForStore = structuredClone(human.snapshot!);
+    corruptedForStore.state.status = "waiting_approval";
+    let storeSaveRejected = false;
+    try {
+      await store.save(corruptedForStore);
+    } catch {
+      storeSaveRejected = (await store.list()).length === 0;
+    }
+    const forgedToolArguments = structuredClone(toolApproval.snapshot!);
+    const forgedCall = forgedToolArguments.pendingToolApproval!.pendingExec.pendingToolCall;
+    forgedCall.arguments.priority = "ordinary";
+    forgedToolArguments.pendingToolApproval!.approvalRequest.proposedArguments =
+      structuredClone(forgedCall.arguments);
+    const forgedToolArgumentsRejected = snapshotValidationRejects(forgedToolArguments);
+
+    const forgedOutputRoute = structuredClone(toolApproval.snapshot!);
+    forgedOutputRoute.pendingToolApproval!.pendingExec.decisionOutputKey = "forged_result";
+    const forgedOutputRouteRejected = snapshotValidationRejects(forgedOutputRoute);
+
+    const deniedToolContext = structuredClone(toolApproval.snapshot!);
+    deniedToolContext.context.permissions.deniedTools.push("create_ticket");
+    const deniedToolContextRejected = snapshotValidationRejects(deniedToolContext);
+
+    const forgedRisk = structuredClone(toolApproval.snapshot!);
+    forgedRisk.pendingToolApproval!.approvalRequest.riskLevel = "low";
+    const forgedRiskRejected = snapshotValidationRejects(forgedRisk);
+
+    const extraContextField = structuredClone(toolApproval.snapshot!);
+    (extraContextField.context as unknown as Record<string, unknown>).forged = true;
+    const extraContextFieldRejected = snapshotValidationRejects(extraContextField);
+
+    const duplicateAvailableTool = structuredClone(toolApproval.snapshot!);
+    duplicateAvailableTool.context.availableTools.push(
+      structuredClone(duplicateAvailableTool.context.availableTools[0])
+    );
+    const duplicateAvailableToolRejected = snapshotValidationRejects(duplicateAvailableTool);
+    let duplicateStoreRunsRejected = false;
+    try {
+      assertPendingRunStoreSnapshot({
+        schemaVersion: PENDING_RUN_STORE_SCHEMA_VERSION,
+        savedAt: new Date().toISOString(),
+        runs: [structuredClone(human.snapshot!), structuredClone(human.snapshot!)],
+      });
+    } catch {
+      duplicateStoreRunsRejected = true;
+    }
+    await Promise.all([
+      store.save(structuredClone(human.snapshot!)),
+      store.save(structuredClone(skillApproval.snapshot!)),
+    ]);
+    const concurrentStoreSavesPreservedBoth = (await store.list()).length === 2;
+    await store.clear();
     const checks: CheckResult[] = [
       {
         label: "human_input run 进入 waiting_human_input",
@@ -320,10 +399,60 @@ async function main() {
         pass: completedDump === null,
         detail: "completedDump=" + String(completedDump),
       },
+      {
+        label: "ActorRuntime direct restore 拒绝不自洽 snapshot",
+        pass: directRestoreRejected,
+        detail: String(directRestoreRejected),
+      },
+      {
+        label: "PendingRunStore save 拒绝不自洽 snapshot",
+        pass: storeSaveRejected,
+        detail: String(storeSaveRejected),
+      },
+      {
+        label: "llm_judge Tool approval 拒绝篡改 arguments",
+        pass: forgedToolArgumentsRejected,
+        detail: String(forgedToolArgumentsRejected),
+      },
+      {
+        label: "llm_judge Tool approval 拒绝篡改 output route",
+        pass: forgedOutputRouteRejected,
+        detail: String(forgedOutputRouteRejected),
+      },
+      {
+        label: "Tool approval 拒绝 context denied Tool",
+        pass: deniedToolContextRejected,
+        detail: String(deniedToolContextRejected),
+      },
+      {
+        label: "Tool approval 拒绝伪造 riskLevel",
+        pass: forgedRiskRejected,
+        detail: String(forgedRiskRejected),
+      },
+      {
+        label: "Pending Context 拒绝额外顶层字段",
+        pass: extraContextFieldRejected,
+        detail: String(extraContextFieldRejected),
+      },
+      {
+        label: "Pending Context 拒绝重复 available Tool",
+        pass: duplicateAvailableToolRejected,
+        detail: String(duplicateAvailableToolRejected),
+      },
+      {
+        label: "PendingRunStore 拒绝重复 actorRunId",
+        pass: duplicateStoreRunsRejected,
+        detail: String(duplicateStoreRunsRejected),
+      },
+      {
+        label: "PendingRunStore 同实例并发 save 保留两个 run",
+        pass: concurrentStoreSavesPreservedBoth,
+        detail: String(concurrentStoreSavesPreservedBoth),
+      },
     ];
 
     console.log("=".repeat(60));
-    console.log("  ✅ Pending Run Persistence 验收检查 (18 条)");
+    console.log(`  ✅ Pending Run Persistence 验收检查 (${checks.length} 条)`);
     console.log("=".repeat(60));
 
     let passCount = 0;

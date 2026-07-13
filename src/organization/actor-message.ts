@@ -18,6 +18,17 @@ export interface ActorMessage {
   acknowledgedAt?: string;
 }
 
+export type SendActorMessageInput = Pick<
+  ActorMessage,
+  "fromActorId" | "toActorId" | "type" | "payload"
+>;
+
+const MESSAGE_TYPES = new Set<ActorMessageType>([
+  "task_request",
+  "task_response",
+  "information",
+]);
+
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
@@ -28,8 +39,22 @@ export class ActorInbox {
 
   constructor(public readonly organizationId: string) {}
 
-  send(input: Omit<ActorMessage, "organizationId" | "messageId" | "status" | "createdAt">): ActorMessage {
-    assertJsonSafe(input.payload, "message.payload");
+  send(input: SendActorMessageInput): ActorMessage {
+    assertJsonSafe(input, "message");
+    if (
+      typeof input.fromActorId !== "string" ||
+      input.fromActorId.length === 0 ||
+      typeof input.toActorId !== "string" ||
+      input.toActorId.length === 0 ||
+      !MESSAGE_TYPES.has(input.type)
+    ) {
+      throw new OrganizationError("invalid_input", "Message has invalid sender, recipient, or type");
+    }
+    if (Object.keys(input).some((field) =>
+      !["fromActorId", "toActorId", "type", "payload"].includes(field)
+    )) {
+      throw new OrganizationError("invalid_input", "Message has unsupported fields");
+    }
     const message: ActorMessage = {
       ...clone(input),
       organizationId: this.organizationId,
@@ -99,6 +124,28 @@ export class ActorInbox {
       }
       if (this.messages.has(message.messageId)) {
         throw new OrganizationError("invalid_input", `Duplicate message ${message.messageId} in snapshot`);
+      }
+      if (
+        typeof message.messageId !== "string" ||
+        message.messageId.length === 0 ||
+        typeof message.fromActorId !== "string" ||
+        typeof message.toActorId !== "string" ||
+        typeof message.createdAt !== "string" ||
+        !["task_request", "task_response", "information"].includes(message.type) ||
+        !["queued", "delivered", "acknowledged"].includes(message.status) ||
+        (message.deliveredAt !== undefined && typeof message.deliveredAt !== "string") ||
+        (message.acknowledgedAt !== undefined && typeof message.acknowledgedAt !== "string") ||
+        (message.status === "queued" &&
+          (message.deliveredAt !== undefined || message.acknowledgedAt !== undefined)) ||
+        (message.status === "delivered" &&
+          (!message.deliveredAt || message.acknowledgedAt !== undefined)) ||
+        (message.status === "acknowledged" &&
+          (!message.deliveredAt || !message.acknowledgedAt))
+      ) {
+        throw new OrganizationError(
+          "invalid_input",
+          `Message ${String(message.messageId)} has invalid lifecycle fields`
+        );
       }
       assertJsonSafe(message.payload, `message ${message.messageId}.payload`);
       this.messages.set(message.messageId, clone(message));

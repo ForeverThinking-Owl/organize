@@ -15,6 +15,7 @@ import { SkillState, resolveTemplateValue } from "./skill-runtime";
 import { traceLogger } from "../trace/trace-logger";
 import { llmGateway } from "../llm/llm-gateway";
 import { buildActorJudgePrompt } from "../llm/prompts/actor-judge.prompt";
+import { buildCanonicalPendingToolDescriptor } from "./pending-tool-descriptor";
 
 export const DEFAULT_TRIAGE_OUTPUT_SCHEMA: Record<string, unknown> = {
   type: "object",
@@ -159,25 +160,19 @@ export class ActorDecisionEngine {
       judgeResult,
     });
 
-    if (judgeResult.should_create_ticket === true) {
+    const pendingTool = buildCanonicalPendingToolDescriptor(step, state, context);
+    if (pendingTool) {
       const ticketDecision: ToolCallDecision = {
         decisionType: "tool_call",
         reasoningSummary: `分流判断: ${judgeResult.reason ?? ""}`,
         toolCall: {
-          toolName: "create_ticket",
-          arguments: {
-            title: "客户问题处理工单",
-            type: ["technical", "after_sales"].join(","),
-            priority: "urgent",
-            description: `客户反馈：${context.input.text}`,
-            order_id: context.runtimeContext.order_id ?? "ORDER_10086",
-            customer_id: context.runtimeContext.customer_id ?? "C001",
-          },
+          toolName: pendingTool.toolName,
+          arguments: pendingTool.arguments,
           purpose: "为客户问题创建处理工单",
-          outputKey: "create_ticket_result",
+          outputKey: pendingTool.decisionOutputKey,
         },
         permissionCheck: {
-          allowed: context.permissions.allowedTools.includes("create_ticket"),
+          allowed: context.permissions.allowedTools.includes(pendingTool.toolName),
         },
         approvalCheck: {
           required: judgeResult.need_finance === true,
