@@ -64,6 +64,26 @@ const WAIT_SKILL: SkillConfig = {
   ],
 };
 
+const WAIT_EXTERNAL_EVENT_SKILL: SkillConfig = {
+  skill_id: "wait_for_payment_confirmation",
+  name: "Wait For Payment Confirmation",
+  steps: [
+    {
+      step_key: "wait_payment",
+      type: "wait_external_event",
+      event_name: "payment.confirmed",
+      correlation_key: "tenant/{{context.correlation_id}}",
+      reason: "Wait for a correlated payment confirmation.",
+      output_key: "payment_event",
+    },
+    {
+      step_key: "return",
+      type: "return",
+      output_mapping: { status: "confirmed" },
+    },
+  ],
+};
+
 function config(organizationId: string, actorId: string, skills: string[]): ActorConfig {
   return {
     actor_id: actorId,
@@ -121,6 +141,107 @@ function stablePendingSnapshot(value: ReturnType<typeof actorRuntime.dumpPending
   const snapshot = structuredClone(value);
   snapshot.savedAt = "<ignored>";
   return JSON.stringify(snapshot);
+}
+
+function unsafeExternalCorrelationSnapshot(
+  snapshot: OrganizationSnapshot,
+  correlationValue: unknown,
+  storedCorrelationKey: string
+): OrganizationSnapshot {
+  const unsafe = structuredClone(snapshot);
+  const pending = unsafe.runtimeRecovery?.pendingRuns.find(
+    (candidate) => candidate.pendingKind === "external_event"
+  );
+  if (!pending?.pendingExternalEvent) throw new Error("Expected external-event pending run");
+  const task = unsafe.tasks.find((candidate) => candidate.actorRunId === pending.actorRunId);
+  const embeddedContext = pending.state.context.context;
+  if (
+    !task?.runtimeContext ||
+    embeddedContext === null ||
+    typeof embeddedContext !== "object" ||
+    Array.isArray(embeddedContext)
+  ) {
+    throw new Error("Expected restorable external-event runtime context");
+  }
+
+  task.runtimeContext.correlation_id = structuredClone(correlationValue);
+  pending.context.runtimeContext.correlation_id = structuredClone(correlationValue);
+  pending.state.context.correlation_id = structuredClone(correlationValue);
+  (embeddedContext as Record<string, unknown>).correlation_id = structuredClone(correlationValue);
+  pending.pendingExternalEvent.correlationKey = storedCorrelationKey;
+
+  const actorTrace = unsafe.runtimeRecovery?.trace.traces.find(
+    (candidate) => candidate.actorRunId === pending.actorRunId
+  );
+  if (!actorTrace) throw new Error("Expected external-event Actor trace");
+  for (const event of actorTrace.events) {
+    if (
+      event.eventType === "external_event_requested" ||
+      event.eventType === "actor_run_suspended"
+    ) {
+      event.data.correlationKey = storedCorrelationKey;
+    }
+  }
+  return unsafe;
+}
+
+function rejectedExternalCorrelationRestore(
+  snapshot: OrganizationSnapshot,
+  actorRunId: string,
+  correlationValue: unknown,
+  storedCorrelationKey: string
+): {
+  rejected: boolean;
+  errorMessage: string;
+  organizationAbsent: boolean;
+  actorRuntimeAbsent: boolean;
+  traceAbsent: boolean;
+  memoryAbsent: boolean;
+} {
+  const corrupted = unsafeExternalCorrelationSnapshot(
+    snapshot,
+    correlationValue,
+    storedCorrelationKey
+  );
+  const organizationId = corrupted.organization.organizationId;
+  const coldRuntime = new OrganizationRuntime(actorRuntime);
+  let rejected = false;
+  let errorMessage = "restore unexpectedly succeeded";
+  try {
+    coldRuntime.restoreSnapshot(corrupted);
+  } catch (error) {
+    rejected = error instanceof OrganizationError && error.code === "invalid_input";
+    errorMessage = error instanceof Error ? error.message : String(error);
+  }
+
+  let organizationAbsent = false;
+  try {
+    coldRuntime.getOrganization(organizationId);
+  } catch (error) {
+    organizationAbsent = error instanceof OrganizationError && error.code === "not_found";
+  }
+  const actorRuntimeAbsent =
+    !actorRuntime.hasRun(actorRunId) &&
+    actorRuntime.dumpPendingRun(actorRunId) === null;
+  const traceAbsent = traceLogger.getTrace(actorRunId) === undefined;
+  const memory = memoryService.dumpOrganizationSnapshot(organizationId);
+  const memoryAbsent = memory.memories.length === 0 && memory.candidates.length === 0;
+
+  if (!organizationAbsent) coldRuntime.clearOrganization(organizationId);
+  else {
+    actorRuntime.clearRun(actorRunId);
+    traceLogger.clearRuns([actorRunId]);
+    memoryService.clearOrganization(organizationId);
+  }
+
+  return {
+    rejected,
+    errorMessage,
+    organizationAbsent,
+    actorRuntimeAbsent,
+    traceAbsent,
+    memoryAbsent,
+  };
 }
 
 async function main(): Promise<void> {
@@ -246,6 +367,65 @@ async function main(): Promise<void> {
     const betaPendingSurvivedClear = Boolean(actorRuntime.dumpPendingRun(betaRun.output.actorRunId));
     const betaPendingBeforeCorruption = stablePendingSnapshot(
       actorRuntime.dumpPendingRun(betaRun.output.actorRunId)
+    );
+
+    const externalOrganizationId = "org_recovery_external_corruption";
+    const externalRuntime = new OrganizationRuntime(actorRuntime);
+    externalRuntime.createOrganization({
+      organizationId: externalOrganizationId,
+      name: "External Correlation Recovery",
+    });
+    externalRuntime.registerActor(externalOrganizationId, {
+      actorConfig: config(
+        externalOrganizationId,
+        "manager",
+        [WAIT_EXTERNAL_EVENT_SKILL.skill_id]
+      ),
+      skills: [WAIT_EXTERNAL_EVENT_SKILL],
+      capabilities: CAPABILITIES,
+    });
+    const externalTask = externalRuntime.createTask({
+      organizationId: externalOrganizationId,
+      requestedByActorId: "manager",
+      title: "Wait for correlated external event",
+      input: { text: "wait" },
+      runtimeContext: { correlation_id: "ORDER_SAFE" },
+    });
+    externalRuntime.assignTask({
+      organizationId: externalOrganizationId,
+      requestedByActorId: "manager",
+      taskId: externalTask.taskId,
+      actorId: "manager",
+      skillId: WAIT_EXTERNAL_EVENT_SKILL.skill_id,
+    });
+    externalRuntime.enqueueTask({
+      organizationId: externalOrganizationId,
+      requestedByActorId: "manager",
+      taskId: externalTask.taskId,
+    });
+    const externalRun = await externalRuntime.dispatchNext({
+      organizationId: externalOrganizationId,
+    });
+    if (!externalRun?.output.pendingExternalEvent) {
+      throw new Error("Expected waiting external-event run");
+    }
+    const externalSnapshot = externalRuntime.dumpSnapshot({
+      organizationId: externalOrganizationId,
+      requestedByActorId: "manager",
+    });
+    externalRuntime.clearOrganization(externalOrganizationId);
+
+    const partialObjectCorrelationRestore = rejectedExternalCorrelationRestore(
+      externalSnapshot,
+      externalRun.output.actorRunId,
+      { tenant: "org_recovery_external_corruption", order: "ORDER_SAFE" },
+      'tenant/{"tenant":"org_recovery_external_corruption","order":"ORDER_SAFE"}'
+    );
+    const partialEmptyCorrelationRestore = rejectedExternalCorrelationRestore(
+      externalSnapshot,
+      externalRun.output.actorRunId,
+      "",
+      "tenant/"
     );
     const corruptedCrossReferenceRejected = corruptedSnapshotRejected(stored, (candidate) => {
       if (candidate.messages[0]) candidate.messages[0].toActorId = "missing_actor";
@@ -625,6 +805,35 @@ async function main(): Promise<void> {
         label: "corrupted Actor Trace run references are rejected",
         pass: actorTraceRunReferenceRejected,
         detail: String(actorTraceRunReferenceRejected),
+      },
+      {
+        label: "Organization recovery rejects unsafe external correlation tokens",
+        pass:
+          partialObjectCorrelationRestore.rejected &&
+          partialObjectCorrelationRestore.errorMessage.includes(
+            "must resolve to a string, number, or boolean"
+          ) &&
+          partialEmptyCorrelationRestore.rejected &&
+          partialEmptyCorrelationRestore.errorMessage.includes("resolved to an empty string"),
+        detail:
+          `object=${partialObjectCorrelationRestore.errorMessage}; ` +
+          `empty=${partialEmptyCorrelationRestore.errorMessage}`,
+      },
+      {
+        label: "failed external correlation recovery leaves no partial state",
+        pass: [partialObjectCorrelationRestore, partialEmptyCorrelationRestore].every(
+          (result) =>
+            result.organizationAbsent &&
+            result.actorRuntimeAbsent &&
+            result.traceAbsent &&
+            result.memoryAbsent
+        ),
+        detail: [partialObjectCorrelationRestore, partialEmptyCorrelationRestore]
+          .map((result) =>
+            `organization=${result.organizationAbsent}, runtime=${result.actorRuntimeAbsent}, ` +
+            `trace=${result.traceAbsent}, memory=${result.memoryAbsent}`
+          )
+          .join(" | "),
       },
       {
         label: "failed recovery preflight preserves another organization",

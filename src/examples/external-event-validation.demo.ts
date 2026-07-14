@@ -87,6 +87,15 @@ interface CorrelationSetupScenario {
   errorMessage?: string;
 }
 
+interface RejectedBundleCorrelationRestoreScenario {
+  actorRunId: string;
+  errorMessage?: string;
+  hasRun: boolean;
+  hasPendingRun: boolean;
+  hasTrace: boolean;
+  memoryUnchanged: boolean;
+}
+
 function registerTools(): void {
   toolGateway.registerDefinition(queryOrderInfoTool);
   toolGateway.registerExecutor("query_order_info", new QueryOrderInfoExecutor());
@@ -413,6 +422,87 @@ function rejectedRestoreError(snapshot: PendingRunSnapshot): string | undefined 
   }
 }
 
+async function runTamperedBundleCorrelationRestoreScenario(): Promise<RejectedBundleCorrelationRestoreScenario> {
+  resetRuntime();
+  const waiting = await actorRuntime.run({
+    actorConfig: ACTOR_CONFIG,
+    skillConfig: correlationOnlySkillConfig(
+      "tenant/{{context.correlation_id}}"
+    ),
+    input: { text: "等待 RuntimeRecoveryBundle correlation 篡改验证事件。" },
+    runtimeContext: { correlation_id: "ORDER_10086" },
+  });
+  const bundle = createRuntimeRecoveryBundle(waiting.actorRunId);
+  if (!bundle) throw new Error("Expected recovery bundle");
+
+  clearFullRuntime(waiting.actorRunId);
+  const memoryBefore = memoryService.dumpSnapshot();
+  const unsafe = JSON.parse(JSON.stringify(bundle)) as typeof bundle;
+  const step = unsafe.pendingRun.skill.steps[unsafe.pendingRun.state.currentStepIndex];
+  const pendingExternalEvent = unsafe.pendingRun.pendingExternalEvent;
+  if (step?.type !== "wait_external_event" || !pendingExternalEvent) {
+    throw new Error("Expected external-event recovery bundle");
+  }
+
+  const storedCorrelationKey =
+    'tenant/{"tenant":"org_001","order":"ORDER_10086"}';
+  const tamperedCorrelation = {
+    tenant: "org_001",
+    order: "ORDER_10086",
+  };
+  unsafe.pendingRun.state.context.correlation_id = tamperedCorrelation;
+  const embeddedContext = unsafe.pendingRun.state.context.context;
+  if (
+    embeddedContext !== null &&
+    typeof embeddedContext === "object" &&
+    !Array.isArray(embeddedContext)
+  ) {
+    (embeddedContext as Record<string, unknown>).correlation_id =
+      tamperedCorrelation;
+  }
+  pendingExternalEvent.correlationKey = storedCorrelationKey;
+  for (const event of unsafe.trace.traces[0]?.events ?? []) {
+    if (
+      event.eventType === "external_event_requested" ||
+      event.eventType === "actor_run_suspended"
+    ) {
+      event.data.correlationKey = storedCorrelationKey;
+    }
+  }
+
+  let errorMessage: string | undefined;
+  try {
+    restoreRuntimeRecoveryBundle(unsafe);
+  } catch (error) {
+    errorMessage = error instanceof Error ? error.message : String(error);
+  }
+
+  const hasRun = actorRuntime.hasRun(waiting.actorRunId);
+  const hasPendingRun = actorRuntime.dumpPendingRun(waiting.actorRunId) !== null;
+  const hasTrace = traceLogger.getTrace(waiting.actorRunId) !== undefined;
+  const memoryAfter = memoryService.dumpSnapshot();
+  const memoryUnchanged = JSON.stringify({
+    memories: memoryAfter.memories,
+    candidates: memoryAfter.candidates,
+    lastWriteSummary: memoryAfter.lastWriteSummary,
+  }) === JSON.stringify({
+    memories: memoryBefore.memories,
+    candidates: memoryBefore.candidates,
+    lastWriteSummary: memoryBefore.lastWriteSummary,
+  });
+
+  actorRuntime.clearRun(waiting.actorRunId);
+  traceLogger.clearRuns([waiting.actorRunId]);
+  return {
+    actorRunId: waiting.actorRunId,
+    errorMessage,
+    hasRun,
+    hasPendingRun,
+    hasTrace,
+    memoryUnchanged,
+  };
+}
+
 function successChecks(scenario: ScenarioResult): CheckResult[] {
   const output = scenario.completed.result ?? {};
   const received = scenario.received;
@@ -591,9 +681,19 @@ async function main() {
     "tenant/{{context.correlation_id}}",
     { correlation_id: "ORDER_10086" }
   );
+  const numberCorrelation = await runCorrelationSetupScenario(
+    "{{context.correlation_id}}",
+    { correlation_id: 10086 }
+  );
+  const booleanCorrelation = await runCorrelationSetupScenario(
+    "tenant/{{context.correlation_id}}",
+    { correlation_id: true }
+  );
   const omittedCorrelation = await runCorrelationSetupScenario(undefined);
   console.log("  Literal status: " + literalCorrelation.output.status);
   console.log("  Resolved template status: " + resolvedTemplateCorrelation.output.status);
+  console.log("  Number template status: " + numberCorrelation.output.status);
+  console.log("  Boolean template status: " + booleanCorrelation.output.status);
   console.log("  Omitted correlation status: " + omittedCorrelation.output.status);
   console.log();
 
@@ -644,6 +744,21 @@ async function main() {
   console.log("  Partial array snapshot rejected: " + Boolean(partialArrayRestoreError));
   console.log("  Partial empty snapshot rejected: " + Boolean(partialEmptyRestoreError));
   console.log("  Partial whitespace snapshot rejected: " + Boolean(partialWhitespaceRestoreError));
+  console.log();
+
+  console.log("📦 Case J: tampered RuntimeRecoveryBundle correlation fails atomically");
+  const tamperedBundleCorrelation =
+    await runTamperedBundleCorrelationRestoreScenario();
+  console.log("  Bundle rejected: " + Boolean(tamperedBundleCorrelation.errorMessage));
+  console.log(
+    "  Partial state absent: " +
+      String(
+        !tamperedBundleCorrelation.hasRun &&
+        !tamperedBundleCorrelation.hasPendingRun &&
+        !tamperedBundleCorrelation.hasTrace &&
+        tamperedBundleCorrelation.memoryUnchanged
+      )
+  );
   console.log();
 
   const optionalCorrelation = validateExternalEventCorrelation(
@@ -778,6 +893,23 @@ async function main() {
       detail: JSON.stringify(resolvedTemplateCorrelation.output.pendingExternalEvent ?? null),
     },
     {
+      label: "number correlation token remains compatible",
+      pass:
+        numberCorrelation.output.status === "waiting_external_event" &&
+        numberCorrelation.output.pendingExternalEvent?.correlationKey === "10086" &&
+        numberCorrelation.pendingSnapshot?.pendingKind === "external_event",
+      detail: JSON.stringify(numberCorrelation.output.pendingExternalEvent ?? null),
+    },
+    {
+      label: "boolean correlation token remains compatible",
+      pass:
+        booleanCorrelation.output.status === "waiting_external_event" &&
+        booleanCorrelation.output.pendingExternalEvent?.correlationKey ===
+          "tenant/true" &&
+        booleanCorrelation.pendingSnapshot?.pendingKind === "external_event",
+      detail: JSON.stringify(booleanCorrelation.output.pendingExternalEvent ?? null),
+    },
+    {
       label: "omitted correlation remains compatible",
       pass:
         omittedCorrelation.output.status === "waiting_external_event" &&
@@ -828,6 +960,29 @@ async function main() {
         partialWhitespaceRestoreError?.includes("resolved to an empty string") === true &&
         !actorRuntime.hasRun(literalCorrelation.output.actorRunId),
       detail: partialWhitespaceRestoreError ?? "restore unexpectedly succeeded",
+    },
+    {
+      label: "tampered RuntimeRecoveryBundle correlation is rejected",
+      pass:
+        tamperedBundleCorrelation.errorMessage?.includes(
+          "must resolve to a string, number, or boolean"
+        ) === true,
+      detail:
+        tamperedBundleCorrelation.errorMessage ?? "restore unexpectedly succeeded",
+    },
+    {
+      label: "rejected RuntimeRecoveryBundle leaves no partial runtime state",
+      pass:
+        !tamperedBundleCorrelation.hasRun &&
+        !tamperedBundleCorrelation.hasPendingRun &&
+        !tamperedBundleCorrelation.hasTrace &&
+        tamperedBundleCorrelation.memoryUnchanged,
+      detail:
+        `actorRunId=${tamperedBundleCorrelation.actorRunId}, ` +
+        `run=${tamperedBundleCorrelation.hasRun}, ` +
+        `pending=${tamperedBundleCorrelation.hasPendingRun}, ` +
+        `trace=${tamperedBundleCorrelation.hasTrace}, ` +
+        `memoryUnchanged=${tamperedBundleCorrelation.memoryUnchanged}`,
     },
   ];
 

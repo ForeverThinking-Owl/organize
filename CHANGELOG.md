@@ -30,6 +30,7 @@ Current version: `v0.5.1 — Governance Fail-Closed`
 |---|---|
 | `npm run typecheck` | TypeScript type-check / 类型检查 |
 | `npm run build` | Compile / 编译 |
+| `npm run start:dist` | Compiled output runtime smoke / 编译产物运行冒烟测试 |
 | `npm run demo` | Actor Kernel demo, 26 checks / Actor Kernel Demo，26 条验收 |
 | `npm run demo:memory` | Hybrid Memory demo, 12 checks / 混合记忆 Demo，12 条验收 |
 | `npm run demo:memory:persistence` | MemorySnapshot demo, 10 checks / 记忆快照 Demo，10 条验收 |
@@ -44,11 +45,11 @@ Current version: `v0.5.1 — Governance Fail-Closed`
 | `npm run demo:recovery:bundle` | Runtime Recovery Bundle demo, 30 checks / Runtime Recovery Bundle Demo，30 条验收 |
 | `npm run demo:recovery:cross-process` | Cross-process Recovery demo, 24 checks / 跨进程恢复 Demo，24 条验收 |
 | `npm run demo:external:event` | External Event Runtime demo, 15 checks / External Event Runtime Demo，15 条验收 |
-| `npm run demo:external:event:validation` | External Event Validation demo, 65 checks / External Event Validation Demo，65 条验收 |
+| `npm run demo:external:event:validation` | External Event Validation demo, 69 checks / External Event Validation Demo，69 条验收 |
 | `npm run demo:tool:approval:fail-closed` | Tool Approval Fail-Closed demo, 15 checks / Tool Approval Fail-Closed Demo，15 条验收 |
 | `npm run demo:continuation:validation` | Retry-safe continuation demo, 81 checks / Retry-safe continuation Demo，81 条验收 |
 | `npm run demo:organization` | Organization Runtime demo, 32 checks / Organization Runtime Demo，32 条验收 |
-| `npm run demo:organization:recovery` | Organization Recovery demo, 42 checks / Organization Recovery Demo，42 条验收 |
+| `npm run demo:organization:recovery` | Organization Recovery demo, 44 checks / Organization Recovery Demo，44 条验收 |
 | `npm run demo:organization:pending:recovery` | Four pending kinds recovery demo, 21 checks / 四类 pending 恢复 Demo，21 条验收 |
 | `npm run demo:organization:lifecycle` | In-flight lifecycle hardening demo, 19 checks / 运行中生命周期加固 Demo，19 条验收 |
 
@@ -62,7 +63,8 @@ Current version: `v0.5.1 — Governance Fail-Closed`
 - Fail the Actor run before allocating a request id, creating a pending run, or recording `external_event_requested` / `actor_run_suspended` when correlation setup is unsafe.
 - Revalidate correlation resolution during PendingRun restore, so unsafe v0.5.0 v2 checkpoints fail closed without a schema-version bump.
 - Preserve compatibility for literal correlation keys, fully resolved templates, and Skills that omit correlation.
-- Expand External Event Validation from 25 to 65 checks and add 15 Tool Approval Fail-Closed checks. The 21 CI demos now cover 502 checks.
+- Expand External Event Validation from 25 to 69 checks, Organization Recovery from 42 to 44 checks, and add 15 Tool Approval Fail-Closed checks. The 21 CI demos now cover 508 unique checks.
+- Emit CommonJS that runs without a development loader, and execute the compiled demo through native Node via `start:dist` after every CI build.
 - Synchronize package / lockfile / Docker Compose metadata at v0.5.1.
 
 中文：
@@ -73,7 +75,8 @@ Current version: `v0.5.1 — Governance Fail-Closed`
 - correlation 配置不安全时，在分配 request id、创建 pending run、记录 `external_event_requested` 或 `actor_run_suspended` 之前终止 Actor run。
 - PendingRun 恢复会重新校验 correlation 解析，因此不安全的 v0.5.0 v2 checkpoint 会在不升级 schema 的前提下 fail closed。
 - 字面 correlation、完整解析的模板以及未声明 correlation 的 Skill 保持兼容。
-- External Event Validation 从 25 条扩展到 65 条，并新增 15 条 Tool Approval Fail-Closed 验收；21 个 CI Demo 共覆盖 502 条检查。
+- External Event Validation 从 25 条扩展到 69 条、Organization Recovery 从 42 条扩展到 44 条，并新增 15 条 Tool Approval Fail-Closed 验收；21 个 CI Demo 共覆盖 508 条独立检查。
+- 编译产物改为无需开发加载器的 CommonJS；CI 每次 build 后都会通过原生 Node 的 `start:dist` 运行编译 Demo。
 - package、lockfile 与 Docker Compose 元数据同步到 v0.5.1。
 
 ---

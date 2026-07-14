@@ -88,6 +88,7 @@ npm run demo:organization:pending:recovery # Four Pending Kinds Recovery Demo
 npm run demo:organization:lifecycle # In-flight Clear Protection Demo
 npm run typecheck                  # TypeScript type-check
 npm run build                      # Compile
+npm run start:dist                 # Compiled output runtime smoke
 ```
 
 ## Organization Runtime Foundation
@@ -236,4 +237,5 @@ npm run demo:organization:pending:recovery
 npm run demo:organization:lifecycle
 npm run typecheck
 npm run build
+npm run start:dist
 ```
