@@ -5,6 +5,7 @@ import type {
   ActorRunOutput,
   ActorRunStatus,
   ActorRuntime,
+  HandoffRequest,
 } from "../runtime/actor-runtime";
 import { actorRuntime } from "../runtime/actor-runtime";
 import { memoryService } from "../memory/memory-service";
@@ -30,6 +31,11 @@ import { assertTraceSnapshot, TRACE_SNAPSHOT_SCHEMA_VERSION } from "../trace/tra
 import { ActorRegistry, type RegisterActorInput, type RegisteredActor } from "./actor-registry";
 import { ActorInbox, type ActorMessage, type ActorMessageType } from "./actor-message";
 import {
+  computeOrganizationHandoffFingerprint,
+  OrganizationHandoffRegistry,
+  type OrganizationHandoffRecord,
+} from "./organization-handoff";
+import {
   assertOrganization,
   createOrganization,
   type CreateOrganizationInput,
@@ -48,9 +54,9 @@ import {
 import { assertJsonSafe, type OrganizationCapability } from "./organization-permission";
 import {
   ORGANIZATION_SNAPSHOT_SCHEMA_VERSION,
-  assertOrganizationSnapshot,
   type OrganizationSnapshot,
 } from "./organization-snapshot";
+import { normalizeOrganizationSnapshot } from "./organization-snapshot-migration";
 import type { OrganizationStore } from "./organization-store";
 import {
   TaskManager,
@@ -70,13 +76,38 @@ interface OrganizationState {
   actors: ActorRegistry;
   tasks: TaskManager;
   inbox: ActorInbox;
+  handoffs: OrganizationHandoffRegistry;
   trace: OrganizationTrace;
   activeOperations: number;
+  dispatchLoopActive: boolean;
 }
 
 export interface TaskExecutionResult {
   task: OrganizationTask;
   output: ActorRunOutput;
+  handoff?: {
+    record: OrganizationHandoffRecord;
+    childTask: OrganizationTask;
+    requestMessage: ActorMessage;
+  };
+  responseMessage?: ActorMessage;
+}
+
+export interface DispatchUntilIdleResult {
+  dispatches: number;
+  stopReason: "idle" | "dispatch_limit";
+  dispatchedTaskIds: string[];
+  remainingQueuedTaskIds: string[];
+  blockedTaskIds: string[];
+}
+
+interface OrganizationAggregateSnapshot {
+  tasks: OrganizationTask[];
+  taskQueue: string[];
+  messages: ActorMessage[];
+  inboxOrder: Record<string, string[]>;
+  handoffs: OrganizationHandoffRecord[];
+  trace: OrganizationTraceEvent[];
 }
 
 function clone<T>(value: T): T {
@@ -329,6 +360,281 @@ export class OrganizationRuntime {
     }
   }
 
+  private captureAggregate(state: OrganizationState): OrganizationAggregateSnapshot {
+    return {
+      tasks: state.tasks.list(),
+      taskQueue: state.tasks.listQueue(),
+      messages: state.inbox.list(),
+      inboxOrder: state.inbox.dumpInboxOrder(),
+      handoffs: state.handoffs.list(),
+      trace: state.trace.getEvents(),
+    };
+  }
+
+  private restoreAggregate(
+    state: OrganizationState,
+    snapshot: OrganizationAggregateSnapshot
+  ): void {
+    state.tasks.restore(snapshot.tasks, snapshot.taskQueue);
+    state.inbox.restore(snapshot.messages, snapshot.inboxOrder);
+    state.handoffs.restore(snapshot.handoffs);
+    state.trace.restore(snapshot.trace);
+  }
+
+  private mutateAggregate<T>(state: OrganizationState, mutation: () => T): T {
+    const before = this.captureAggregate(state);
+    try {
+      return mutation();
+    } catch (error) {
+      this.restoreAggregate(state, before);
+      throw error;
+    }
+  }
+
+  private handoffFingerprintEnvelope(
+    organizationId: string,
+    sourceTask: OrganizationTask,
+    request: HandoffRequest
+  ): Record<string, unknown> {
+    return {
+      organizationId,
+      sourceTaskId: sourceTask.taskId,
+      handoffRequestId: request.handoffRequestId,
+      actorRunId: request.actorRunId,
+      sourceActorId: request.sourceActorId,
+      sourceSkillId: request.sourceSkillId,
+      stepKey: request.stepKey,
+      targetActorId: request.targetActorId,
+      targetSkillId: request.targetSkillId,
+      reason: request.reason,
+      handoffContext: request.handoffContext,
+    };
+  }
+
+  private materializeHandoff(
+    state: OrganizationState,
+    sourceTaskId: string,
+    request: HandoffRequest
+  ): NonNullable<TaskExecutionResult["handoff"]> {
+    const sourceTask = state.tasks.get(sourceTaskId);
+    if (
+      !sourceTask.assignedTo ||
+      !sourceTask.skillId ||
+      sourceTask.actorRunId !== request.actorRunId ||
+      sourceTask.assignedTo !== request.sourceActorId ||
+      sourceTask.skillId !== request.sourceSkillId
+    ) {
+      throw new OrganizationError(
+        "invalid_input",
+        `Handoff ${request.handoffRequestId} does not match its source task`
+      );
+    }
+    if (request.sourceActorId === request.targetActorId) {
+      throw new OrganizationError("invalid_input", "An Actor cannot hand off a task to itself");
+    }
+    assertJsonSafe(request.handoffContext, "handoffRequest.handoffContext");
+
+    this.requireCapability(state, request.sourceActorId, "task:delegate");
+    this.requireCapability(state, request.sourceActorId, "message:receive");
+    this.requireCapability(state, request.targetActorId, "task:execute");
+    this.requireCapability(state, request.targetActorId, "message:receive");
+    state.actors.getSkill(request.targetActorId, request.targetSkillId);
+
+    const fingerprint = computeOrganizationHandoffFingerprint(
+      this.handoffFingerprintEnvelope(state.organization.organizationId, sourceTask, request)
+    );
+    const existing = state.handoffs.find(request.handoffRequestId);
+    if (existing) {
+      const childTask = state.tasks.get(existing.childTaskId);
+      const requestMessage = state.inbox.get(existing.requestMessageId);
+      if (
+        existing.fingerprint !== fingerprint ||
+        existing.sourceTaskId !== sourceTask.taskId ||
+        existing.sourceActorId !== request.sourceActorId ||
+        existing.targetActorId !== request.targetActorId ||
+        existing.targetSkillId !== request.targetSkillId ||
+        sourceTask.status !== "delegated" ||
+        sourceTask.outgoingHandoffRequestId !== request.handoffRequestId ||
+        childTask.incomingHandoffRequestId !== request.handoffRequestId ||
+        requestMessage.correlationId !== request.handoffRequestId
+      ) {
+        throw new OrganizationError(
+          "invalid_state",
+          `Handoff ${request.handoffRequestId} has inconsistent existing artifacts`
+        );
+      }
+      return { record: existing, childTask, requestMessage };
+    }
+
+    return this.mutateAggregate(state, () => {
+      const { sourceTask: delegated, childTask } = state.tasks.delegate(sourceTaskId, {
+        handoffRequestId: request.handoffRequestId,
+        targetActorId: request.targetActorId,
+        targetSkillId: request.targetSkillId,
+        input: { payload: clone(request.handoffContext) },
+        runtimeContext: {
+          ...(sourceTask.runtimeContext ?? {}),
+          handoff_request_id: request.handoffRequestId,
+          handoff_parent_task_id: sourceTask.taskId,
+        },
+        title: `${sourceTask.title} — delegated`,
+        description: request.reason,
+      });
+      const requestMessage = state.inbox.sendInternal({
+        fromActorId: request.sourceActorId,
+        toActorId: request.targetActorId,
+        type: "task_request",
+        correlationId: request.handoffRequestId,
+        payload: {
+          handoffRequestId: request.handoffRequestId,
+          sourceTaskId: sourceTask.taskId,
+          childTaskId: childTask.taskId,
+          sourceActorRunId: request.actorRunId,
+          sourceSkillId: request.sourceSkillId,
+          sourceStepKey: request.stepKey,
+          targetActorId: request.targetActorId,
+          targetSkillId: request.targetSkillId,
+          reason: request.reason,
+          input: childTask.input,
+          fingerprint,
+        },
+      });
+      const record = state.handoffs.create({
+        handoffRequestId: request.handoffRequestId,
+        sourceTaskId: sourceTask.taskId,
+        sourceActorId: request.sourceActorId,
+        childTaskId: childTask.taskId,
+        targetActorId: request.targetActorId,
+        targetSkillId: request.targetSkillId,
+        requestMessageId: requestMessage.messageId,
+        fingerprint,
+      });
+      state.trace.record("task_delegated", {
+        actorId: request.sourceActorId,
+        taskId: delegated.taskId,
+        actorRunId: request.actorRunId,
+        handoffRequestId: request.handoffRequestId,
+      }, {
+        childTaskId: childTask.taskId,
+        targetActorId: request.targetActorId,
+        targetSkillId: request.targetSkillId,
+        requestMessageId: requestMessage.messageId,
+        fingerprint,
+      });
+      state.trace.record("task_queued", {
+        actorId: request.targetActorId,
+        taskId: childTask.taskId,
+        handoffRequestId: request.handoffRequestId,
+      }, { delegatedFromTaskId: sourceTask.taskId });
+      state.trace.record("message_enqueued", {
+        actorId: request.sourceActorId,
+        messageId: requestMessage.messageId,
+        handoffRequestId: request.handoffRequestId,
+      }, { toActorId: request.targetActorId, type: requestMessage.type });
+      return { record, childTask, requestMessage };
+    });
+  }
+
+  private enqueueHandoffResponse(
+    state: OrganizationState,
+    childTask: OrganizationTask
+  ): ActorMessage | undefined {
+    const handoffRequestId = childTask.incomingHandoffRequestId;
+    if (!handoffRequestId) return undefined;
+    const record = state.handoffs.get(handoffRequestId);
+    if (record.childTaskId !== childTask.taskId || !childTask.assignedTo) {
+      throw new OrganizationError(
+        "invalid_state",
+        `Task ${childTask.taskId} does not match handoff ${handoffRequestId}`
+      );
+    }
+    if (record.status === "responded") {
+      return state.inbox.get(record.responseMessageId!);
+    }
+    if (childTask.status !== "completed" && childTask.status !== "failed") {
+      throw new OrganizationError(
+        "invalid_state",
+        `Task ${childTask.taskId} cannot respond from ${childTask.status}`
+      );
+    }
+    const responseMessage = state.inbox.sendInternal({
+      fromActorId: childTask.assignedTo,
+      toActorId: record.sourceActorId,
+      type: "task_response",
+      correlationId: handoffRequestId,
+      causationMessageId: record.requestMessageId,
+      payload: {
+        handoffRequestId,
+        sourceTaskId: record.sourceTaskId,
+        childTaskId: childTask.taskId,
+        status: childTask.status,
+        ...(childTask.status === "completed"
+          ? { result: childTask.result ?? null }
+          : { failureReason: childTask.failureReason }),
+      },
+    });
+    state.handoffs.bindResponse(handoffRequestId, responseMessage.messageId);
+    state.trace.record("handoff_response_enqueued", {
+      actorId: childTask.assignedTo,
+      taskId: childTask.taskId,
+      messageId: responseMessage.messageId,
+      ...(childTask.actorRunId ? { actorRunId: childTask.actorRunId } : {}),
+      handoffRequestId,
+    }, {
+      sourceTaskId: record.sourceTaskId,
+      status: childTask.status,
+    });
+    return responseMessage;
+  }
+
+  private acknowledgeHandoffRequest(
+    state: OrganizationState,
+    childTask: OrganizationTask
+  ): ActorMessage | undefined {
+    const handoffRequestId = childTask.incomingHandoffRequestId;
+    if (!handoffRequestId) return undefined;
+    if (!childTask.assignedTo) {
+      throw new OrganizationError("invalid_state", `Task ${childTask.taskId} is not assigned`);
+    }
+    return this.mutateAggregate(state, () => {
+      const record = state.handoffs.get(handoffRequestId);
+      if (record.childTaskId !== childTask.taskId) {
+        throw new OrganizationError(
+          "invalid_state",
+          `Task ${childTask.taskId} does not match handoff ${handoffRequestId}`
+        );
+      }
+      let message = state.inbox.get(record.requestMessageId);
+      if (
+        message.type !== "task_request" ||
+        message.toActorId !== childTask.assignedTo ||
+        message.correlationId !== handoffRequestId
+      ) {
+        throw new OrganizationError(
+          "invalid_state",
+          `Handoff ${handoffRequestId} has an invalid request message`
+        );
+      }
+      if (message.status === "queued") {
+        message = state.inbox.deliver(childTask.assignedTo, message.messageId);
+        state.trace.record("message_delivered", {
+          actorId: childTask.assignedTo,
+          messageId: message.messageId,
+          handoffRequestId,
+        }, { fromActorId: message.fromActorId, type: message.type });
+      }
+      if (message.status === "delivered") {
+        message = state.inbox.acknowledge(childTask.assignedTo, message.messageId);
+        state.trace.record("message_acknowledged", {
+          actorId: childTask.assignedTo,
+          messageId: message.messageId,
+          handoffRequestId,
+        });
+      }
+      return message;
+    });
+  }
+
   createOrganization(input: CreateOrganizationInput): Organization {
     const organization = createOrganization(input);
     if (this.organizations.has(organization.organizationId)) {
@@ -350,8 +656,10 @@ export class OrganizationRuntime {
         actors: new ActorRegistry(organization.organizationId),
         tasks: new TaskManager(organization.organizationId),
         inbox: new ActorInbox(organization.organizationId),
+        handoffs: new OrganizationHandoffRegistry(organization.organizationId),
         trace,
         activeOperations: 0,
+        dispatchLoopActive: false,
       };
       this.organizations.set(organization.organizationId, state);
       trace.record("organization_created", {}, { name: organization.name });
@@ -462,7 +770,7 @@ export class OrganizationRuntime {
     state: OrganizationState,
     taskId: string,
     output: ActorRunOutput
-  ): OrganizationTask {
+  ): Omit<TaskExecutionResult, "output"> {
     const waitingStatus = waitingTaskStatus(output.status);
     if (waitingStatus) {
       const task = state.tasks.suspend(taskId, waitingStatus, output.actorRunId);
@@ -471,16 +779,28 @@ export class OrganizationRuntime {
         taskId,
         actorRunId: output.actorRunId,
       }, { status: waitingStatus });
-      return task;
+      return { task };
+    }
+    if (output.status === "handoff_requested") {
+      if (!output.handoffRequest || output.result !== null) {
+        throw new OrganizationError(
+          "invalid_input",
+          "ActorRuntime returned an invalid terminal handoff output"
+        );
+      }
+      const handoff = this.materializeHandoff(state, taskId, output.handoffRequest);
+      return { task: state.tasks.get(taskId), handoff };
     }
     if (output.status === "completed") {
-      const task = state.tasks.complete(taskId, output.actorRunId, output.result);
-      state.trace.record("task_completed", {
-        actorId: task.assignedTo,
-        taskId,
-        actorRunId: output.actorRunId,
+      return this.mutateAggregate(state, () => {
+        const task = state.tasks.complete(taskId, output.actorRunId, output.result);
+        state.trace.record("task_completed", {
+          actorId: task.assignedTo,
+          taskId,
+          actorRunId: output.actorRunId,
+        });
+        return { task, responseMessage: this.enqueueHandoffResponse(state, task) };
       });
-      return task;
     }
 
     const pending = this.runtime.dumpPendingRun(output.actorRunId);
@@ -491,16 +811,43 @@ export class OrganizationRuntime {
         taskId,
         actorRunId: output.actorRunId,
       }, { status: pending.status, runtimeReturnedError: true });
-      return task;
+      return { task };
     }
 
-    const task = state.tasks.fail(taskId, output.actorRunId, "ActorRuntime returned error");
-    state.trace.record("task_failed", {
-      actorId: task.assignedTo,
-      taskId,
-      actorRunId: output.actorRunId,
+    return this.mutateAggregate(state, () => {
+      const task = state.tasks.fail(taskId, output.actorRunId, "ActorRuntime returned error");
+      state.trace.record("task_failed", {
+        actorId: task.assignedTo,
+        taskId,
+        actorRunId: output.actorRunId,
+      });
+      return { task, responseMessage: this.enqueueHandoffResponse(state, task) };
     });
-    return task;
+  }
+
+  private finalizeTaskFailure(
+    state: OrganizationState,
+    taskId: string,
+    actorId: string,
+    actorRunId: string | undefined,
+    error: unknown
+  ): Omit<TaskExecutionResult, "output"> {
+    return this.mutateAggregate(state, () => {
+      const current = state.tasks.get(taskId);
+      const failed = state.tasks.fail(
+        taskId,
+        actorRunId ?? current.actorRunId,
+        error instanceof Error ? error.message : String(error)
+      );
+      state.trace.record("task_failed", {
+        actorId,
+        taskId,
+        ...(failed.actorRunId ? { actorRunId: failed.actorRunId } : {}),
+      }, {
+        reason: failed.failureReason,
+      });
+      return { task: failed, responseMessage: this.enqueueHandoffResponse(state, failed) };
+    });
   }
 
   async dispatchNext(input: {
@@ -518,6 +865,7 @@ export class OrganizationRuntime {
     try {
       const actor = this.requireCapability(state, actorId, "task:execute");
       const skillConfig = state.actors.getSkill(actorId, skillId);
+      this.acknowledgeHandoffRequest(state, task);
       state.trace.record("task_run_started", {
         actorId,
         taskId: task.taskId,
@@ -534,16 +882,9 @@ export class OrganizationRuntime {
         runtimeOptions: { organizationOwnerToken: this.ownershipToken },
       });
       state.tasks.bindRun(task.taskId, output.actorRunId);
-      return { task: this.applyRunOutput(state, task.taskId, output), output };
+      return { ...this.applyRunOutput(state, task.taskId, output), output };
     } catch (error) {
-      const failed = state.tasks.fail(
-        task.taskId,
-        undefined,
-        error instanceof Error ? error.message : String(error)
-      );
-      state.trace.record("task_failed", { actorId, taskId: task.taskId }, {
-        reason: failed.failureReason,
-      });
+      this.finalizeTaskFailure(state, task.taskId, actorId, undefined, error);
       throw error;
     } finally {
       state.activeOperations -= 1;
@@ -671,9 +1012,18 @@ export class OrganizationRuntime {
       state.tasks.beginContinue(input.taskId);
       const actorTraceEventCountBefore =
         traceLogger.getTrace(waitingTask.actorRunId)?.events.length ?? 0;
-      let output: ActorRunOutput;
       try {
-        output = await this.runtime.continue(waitingTask.actorRunId, authorizedEvent);
+        const output = await this.runtime.continue(waitingTask.actorRunId, authorizedEvent);
+        const actorTraceEventsThisAttempt =
+          traceLogger.getTrace(waitingTask.actorRunId)?.events.slice(actorTraceEventCountBefore) ?? [];
+        if (actorTraceEventsThisAttempt.some((event) => event.eventType === "actor_run_resumed")) {
+          state.trace.record("task_resumed", {
+            actorId: waitingTask.assignedTo,
+            taskId: input.taskId,
+            actorRunId: waitingTask.actorRunId,
+          }, { eventType: authorizedEvent.type });
+        }
+        return { ...this.applyRunOutput(state, input.taskId, output), output };
       } catch (error) {
         if (this.runtime.dumpPendingRun(waitingTask.actorRunId)) {
           state.tasks.suspend(
@@ -682,24 +1032,16 @@ export class OrganizationRuntime {
             waitingTask.actorRunId
           );
         } else {
-          state.tasks.fail(
+          this.finalizeTaskFailure(
+            state,
             input.taskId,
+            waitingTask.assignedTo,
             waitingTask.actorRunId,
-            error instanceof Error ? error.message : String(error)
+            error
           );
         }
         throw error;
       }
-      const actorTraceEventsThisAttempt =
-        traceLogger.getTrace(waitingTask.actorRunId)?.events.slice(actorTraceEventCountBefore) ?? [];
-      if (actorTraceEventsThisAttempt.some((event) => event.eventType === "actor_run_resumed")) {
-        state.trace.record("task_resumed", {
-          actorId: waitingTask.assignedTo,
-          taskId: input.taskId,
-          actorRunId: waitingTask.actorRunId,
-        }, { eventType: authorizedEvent.type });
-      }
-      return { task: this.applyRunOutput(state, input.taskId, output), output };
     } finally {
       state.activeOperations -= 1;
       endOrganizationOperation(input.organizationId);
@@ -712,6 +1054,59 @@ export class OrganizationRuntime {
 
   listTasks(organizationId: string): OrganizationTask[] {
     return this.requireState(organizationId).tasks.list();
+  }
+
+  listHandoffs(organizationId: string): OrganizationHandoffRecord[] {
+    return this.requireState(organizationId).handoffs.list();
+  }
+
+  async dispatchUntilIdle(input: {
+    organizationId: string;
+    actorId?: string;
+    maxDispatches?: number;
+  }): Promise<DispatchUntilIdleResult> {
+    const state = this.requireState(input.organizationId);
+    const maxDispatches = input.maxDispatches ?? 100;
+    if (!Number.isSafeInteger(maxDispatches) || maxDispatches < 1) {
+      throw new OrganizationError("invalid_input", "maxDispatches must be a positive integer");
+    }
+    if (state.dispatchLoopActive) {
+      throw new OrganizationError(
+        "invalid_state",
+        `Organization ${input.organizationId} already has an active dispatch loop`
+      );
+    }
+
+    state.dispatchLoopActive = true;
+    const dispatchedTaskIds: string[] = [];
+    try {
+      while (dispatchedTaskIds.length < maxDispatches) {
+        const result = await this.dispatchNext({
+          organizationId: input.organizationId,
+          actorId: input.actorId,
+        });
+        if (!result) break;
+        dispatchedTaskIds.push(result.task.taskId);
+      }
+      const remainingQueuedTaskIds = state.tasks.listQueue().filter((taskId) => {
+        if (!input.actorId) return true;
+        return state.tasks.get(taskId).assignedTo === input.actorId;
+      });
+      return {
+        dispatches: dispatchedTaskIds.length,
+        stopReason:
+          dispatchedTaskIds.length === maxDispatches && remainingQueuedTaskIds.length > 0
+            ? "dispatch_limit"
+            : "idle",
+        dispatchedTaskIds,
+        remainingQueuedTaskIds,
+        blockedTaskIds: state.tasks.list()
+          .filter((task) => task.status.startsWith("waiting_"))
+          .map((task) => task.taskId),
+      };
+    } finally {
+      state.dispatchLoopActive = false;
+    }
   }
 
   sendMessage(input: {
@@ -791,7 +1186,11 @@ export class OrganizationRuntime {
     const state = this.requireState(input.organizationId);
     this.requireCapability(state, input.requestedByActorId, "organization:snapshot");
     const tasks = state.tasks.list();
-    if (tasks.some((task) => task.status === "running")) {
+    if (
+      state.activeOperations > 0 ||
+      state.dispatchLoopActive ||
+      tasks.some((task) => task.status === "running")
+    ) {
       throw new OrganizationError("invalid_state", "Cannot snapshot an organization with running tasks");
     }
 
@@ -821,6 +1220,7 @@ export class OrganizationRuntime {
       taskQueue: state.tasks.listQueue(),
       messages: state.inbox.listAll(),
       inboxOrder: state.inbox.dumpInboxOrder(),
+      handoffs: state.handoffs.list(),
       trace: state.trace.getEvents(),
       runtimeRecovery: {
         pendingRuns,
@@ -830,8 +1230,16 @@ export class OrganizationRuntime {
     } satisfies OrganizationSnapshot);
   }
 
-  restoreSnapshot(snapshot: OrganizationSnapshot): Organization {
-    assertOrganizationSnapshot(snapshot);
+  restoreSnapshot(snapshotInput: unknown): Organization {
+    let snapshot: OrganizationSnapshot;
+    try {
+      snapshot = normalizeOrganizationSnapshot(snapshotInput);
+    } catch (error) {
+      throw new OrganizationError(
+        "invalid_input",
+        error instanceof Error ? error.message : String(error)
+      );
+    }
     assertOrganization(snapshot.organization);
     const organizationId = snapshot.organization.organizationId;
     if (this.organizations.has(organizationId)) {
@@ -882,7 +1290,7 @@ export class OrganizationRuntime {
       assertRecoveryTaskShape(task);
       const validStatus = [
         "created", "assigned", "queued", "running", "waiting_approval",
-        "waiting_human_input", "waiting_external_event", "completed", "failed", "cancelled",
+        "waiting_human_input", "waiting_external_event", "delegated", "completed", "failed", "cancelled",
       ].includes(task.status);
       const assignedActor = task.assignedTo ? actorsById.get(task.assignedTo) : undefined;
       const hasAssignment = Boolean(task.assignedTo && task.skillId);
@@ -893,10 +1301,18 @@ export class OrganizationRuntime {
         "waiting_approval",
         "waiting_human_input",
         "waiting_external_event",
+        "delegated",
         "completed",
         "failed",
       ].includes(task.status);
-      const requiresRun = task.status.startsWith("waiting_") || task.status === "completed";
+      const requiresRun =
+        task.status.startsWith("waiting_") ||
+        task.status === "delegated" ||
+        task.status === "completed";
+      const requiresActiveActor =
+        task.status === "assigned" ||
+        task.status === "queued" ||
+        task.status.startsWith("waiting_");
       const forbidsRun = ["created", "assigned", "queued", "cancelled"].includes(task.status);
       const hasResult = Object.prototype.hasOwnProperty.call(task, "result");
       const hasFailure = Object.prototype.hasOwnProperty.call(task, "failureReason");
@@ -915,6 +1331,7 @@ export class OrganizationRuntime {
         (task.status === "created" && hasAssignment) ||
         (hasAssignment && (
           !assignedActor ||
+          (requiresActiveActor && assignedActor.status !== "active") ||
           !assignedActor.skills[task.skillId!] ||
           !assignedActor.capabilities.includes("task:execute")
         ))
@@ -1005,8 +1422,11 @@ export class OrganizationRuntime {
         trace.actorId !== task.assignedTo ||
         trace.skillId !== task.skillId ||
         (task.status.startsWith("waiting_") && trace.status !== task.status) ||
+        (task.status === "delegated" && trace.status !== "handoff_requested") ||
         (task.status === "completed" && trace.status !== "completed") ||
-        (task.status === "failed" && trace.status !== "error")
+        (task.status === "failed" &&
+          trace.status !== "error" &&
+          trace.status !== "handoff_requested")
       ) {
         throw new OrganizationError("invalid_input", `Actor trace ${trace.actorRunId} does not match its task`);
       }
@@ -1035,6 +1455,324 @@ export class OrganizationRuntime {
       [...tasksByRunId.keys()].some((actorRunId) => !traceRunIds.has(actorRunId))
     ) {
       throw new OrganizationError("invalid_input", "Actor traces do not match task run bindings");
+    }
+
+    const tasksById = new Map(snapshot.tasks.map((task) => [task.taskId, task]));
+    const messagesById = new Map(snapshot.messages.map((message) => [message.messageId, message]));
+    const tracesByRunId = new Map(
+      runtimeTrace.traces.map((trace) => [trace.actorRunId, trace])
+    );
+    const handoffsById = new Map(
+      snapshot.handoffs.map((handoff) => [handoff.handoffRequestId, handoff])
+    );
+    for (const task of snapshot.tasks) {
+      if (!task.actorRunId || task.status !== "failed") continue;
+      const trace = tracesByRunId.get(task.actorRunId);
+      if (trace?.status !== "handoff_requested") continue;
+      const rejectedEvents = trace.events.filter((event) => event.eventType === "handoff");
+      const rejectedRequestId = rejectedEvents[0]?.data.handoffRequestId;
+      if (
+        rejectedEvents.length !== 1 ||
+        typeof rejectedRequestId !== "string" ||
+        rejectedRequestId.length === 0 ||
+        task.outgoingHandoffRequestId !== undefined ||
+        handoffsById.has(rejectedRequestId) ||
+        snapshot.messages.some((message) => message.correlationId === rejectedRequestId) ||
+        trace.events.some((event) => event.eventType === "final_output")
+      ) {
+        throw new OrganizationError(
+          "invalid_input",
+          `Failed task ${task.taskId} has invalid rejected handoff artifacts`
+        );
+      }
+    }
+    const lineageTasks = snapshot.tasks.filter((task) =>
+      Boolean(task.incomingHandoffRequestId || task.outgoingHandoffRequestId)
+    );
+    if (
+      snapshot.handoffs.length * 2 !== lineageTasks.length ||
+      lineageTasks.some((task) => {
+        const handoffRequestId =
+          task.incomingHandoffRequestId ?? task.outgoingHandoffRequestId!;
+        return !handoffsById.has(handoffRequestId);
+      })
+    ) {
+      throw new OrganizationError("invalid_input", "Handoff records do not match task lineage");
+    }
+
+    for (const handoff of snapshot.handoffs) {
+      const sourceTask = tasksById.get(handoff.sourceTaskId);
+      const childTask = tasksById.get(handoff.childTaskId);
+      const sourceActor = actorsById.get(handoff.sourceActorId);
+      const targetActor = actorsById.get(handoff.targetActorId);
+      const requestMessage = messagesById.get(handoff.requestMessageId);
+      if (
+        !sourceTask ||
+        !childTask ||
+        !sourceActor ||
+        !targetActor ||
+        !requestMessage ||
+        sourceTask.status !== "delegated" ||
+        sourceTask.outgoingHandoffRequestId !== handoff.handoffRequestId ||
+        childTask.parentTaskId !== sourceTask.taskId ||
+        childTask.incomingHandoffRequestId !== handoff.handoffRequestId ||
+        childTask.runtimeContext?.handoff_request_id !== handoff.handoffRequestId ||
+        childTask.runtimeContext?.handoff_parent_task_id !== sourceTask.taskId ||
+        childTask.assignedTo !== handoff.targetActorId ||
+        childTask.skillId !== handoff.targetSkillId ||
+        sourceActor.status !== "active" ||
+        !sourceActor.capabilities.includes("task:delegate") ||
+        !sourceActor.capabilities.includes("message:receive") ||
+        targetActor.status !== "active" ||
+        !targetActor.capabilities.includes("task:execute") ||
+        !targetActor.capabilities.includes("message:receive") ||
+        !targetActor.skills[handoff.targetSkillId] ||
+        requestMessage.type !== "task_request" ||
+        requestMessage.fromActorId !== handoff.sourceActorId ||
+        requestMessage.toActorId !== handoff.targetActorId ||
+        requestMessage.correlationId !== handoff.handoffRequestId ||
+        requestMessage.causationMessageId !== undefined
+      ) {
+        throw new OrganizationError(
+          "invalid_input",
+          `Handoff ${handoff.handoffRequestId} has invalid governed references`
+        );
+      }
+
+      const sourceTrace = sourceTask.actorRunId
+        ? tracesByRunId.get(sourceTask.actorRunId)
+        : undefined;
+      const handoffEvents = sourceTrace?.events.filter(
+        (event) => event.eventType === "handoff"
+      ) ?? [];
+      if (
+        !sourceTrace ||
+        sourceTrace.status !== "handoff_requested" ||
+        handoffEvents.length !== 1 ||
+        sourceTrace.events.some((event) => event.eventType === "final_output")
+      ) {
+        throw new OrganizationError(
+          "invalid_input",
+          `Handoff ${handoff.handoffRequestId} has an invalid source Actor Trace`
+        );
+      }
+      const request = handoffEvents[0].data as unknown as HandoffRequest;
+      if (
+        !isRecord(request) ||
+        request.handoffRequestId !== handoff.handoffRequestId ||
+        request.actorRunId !== sourceTask.actorRunId ||
+        request.sourceActorId !== handoff.sourceActorId ||
+        request.sourceSkillId !== sourceTask.skillId ||
+        request.targetActorId !== handoff.targetActorId ||
+        request.targetSkillId !== handoff.targetSkillId ||
+        typeof request.stepKey !== "string" ||
+        request.stepKey.length === 0 ||
+        typeof request.reason !== "string" ||
+        request.reason.length === 0 ||
+        !isRecord(request.handoffContext)
+      ) {
+        throw new OrganizationError(
+          "invalid_input",
+          `Handoff ${handoff.handoffRequestId} differs from its Actor request`
+        );
+      }
+
+      // A valid fingerprint proves that the persisted handoff artifacts agree
+      // with one another. Recovery must also prove that the currently restored
+      // source Skill actually declared that route; otherwise an attacker could
+      // rewrite the Skill while leaving a self-consistent request envelope.
+      const sourceSkillConfig = sourceActor.skills[sourceTask.skillId];
+      let sourceSkill;
+      try {
+        sourceSkill = parseSkillConfig(sourceSkillConfig, sourceActor.actorId);
+      } catch (error) {
+        throw new OrganizationError(
+          "invalid_input",
+          `Handoff ${handoff.handoffRequestId} source Skill is invalid: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+      const declaredStepIndex = sourceSkill.steps.findIndex(
+        (step) => step.stepKey === request.stepKey
+      );
+      const declaredStep = sourceSkill.steps[declaredStepIndex];
+      if (
+        declaredStepIndex !== sourceSkill.steps.length - 1 ||
+        declaredStep?.type !== "handoff" ||
+        declaredStep.targetActorId !== request.targetActorId ||
+        declaredStep.targetActorId !== handoff.targetActorId ||
+        declaredStep.targetSkillId !== request.targetSkillId ||
+        declaredStep.targetSkillId !== handoff.targetSkillId ||
+        declaredStep.reason !== request.reason
+      ) {
+        throw new OrganizationError(
+          "invalid_input",
+          `Handoff ${handoff.handoffRequestId} is not declared by its source Skill`
+        );
+      }
+      // inputMapping cannot be replayed here because terminal Actor recovery
+      // snapshots do not retain every intermediate Skill output. Its resolved
+      // handoffContext remains covered by the fingerprint and the exact child,
+      // message, and Trace equality checks below.
+      const fingerprint = computeOrganizationHandoffFingerprint(
+        this.handoffFingerprintEnvelope(organizationId, sourceTask, request)
+      );
+      if (fingerprint !== handoff.fingerprint) {
+        throw new OrganizationError(
+          "invalid_input",
+          `Handoff ${handoff.handoffRequestId} fingerprint does not match its Actor request`
+        );
+      }
+      assertRecoveryEqual(
+        childTask.input,
+        { payload: request.handoffContext },
+        `Handoff ${handoff.handoffRequestId} child input differs from its Actor request`
+      );
+      assertRecoveryEqual(
+        childTask.runtimeContext ?? {},
+        {
+          ...(sourceTask.runtimeContext ?? {}),
+          handoff_request_id: handoff.handoffRequestId,
+          handoff_parent_task_id: sourceTask.taskId,
+        },
+        `Handoff ${handoff.handoffRequestId} child runtime context is inconsistent`
+      );
+      assertRecoveryEqual(
+        requestMessage.payload,
+        {
+          handoffRequestId: handoff.handoffRequestId,
+          sourceTaskId: sourceTask.taskId,
+          childTaskId: childTask.taskId,
+          sourceActorRunId: sourceTask.actorRunId,
+          sourceSkillId: sourceTask.skillId,
+          sourceStepKey: request.stepKey,
+          targetActorId: handoff.targetActorId,
+          targetSkillId: handoff.targetSkillId,
+          reason: request.reason,
+          input: childTask.input,
+          fingerprint,
+        },
+        `Handoff ${handoff.handoffRequestId} request message is inconsistent`
+      );
+      const delegatedEvents = snapshot.trace.filter(
+        (event) =>
+          event.eventType === "task_delegated" &&
+          event.handoffRequestId === handoff.handoffRequestId
+      );
+      if (
+        delegatedEvents.length !== 1 ||
+        delegatedEvents[0].actorId !== handoff.sourceActorId ||
+        delegatedEvents[0].taskId !== sourceTask.taskId ||
+        delegatedEvents[0].actorRunId !== sourceTask.actorRunId
+      ) {
+        throw new OrganizationError(
+          "invalid_input",
+          `Handoff ${handoff.handoffRequestId} has an invalid Organization delegation Trace`
+        );
+      }
+      assertRecoveryEqual(
+        delegatedEvents[0].data,
+        {
+          childTaskId: childTask.taskId,
+          targetActorId: handoff.targetActorId,
+          targetSkillId: handoff.targetSkillId,
+          requestMessageId: requestMessage.messageId,
+          fingerprint,
+        },
+        `Handoff ${handoff.handoffRequestId} Organization Trace differs from its artifacts`
+      );
+
+      const childTerminal = childTask.status === "completed" || childTask.status === "failed";
+      if (
+        ["created", "assigned", "delegated", "cancelled"].includes(childTask.status) ||
+        (childTask.status !== "queued" && requestMessage.status !== "acknowledged") ||
+        (childTerminal !== (handoff.status === "responded"))
+      ) {
+        throw new OrganizationError(
+          "invalid_input",
+          `Handoff ${handoff.handoffRequestId} has an invalid child lifecycle`
+        );
+      }
+      if (handoff.status === "responded") {
+        const responseMessage = messagesById.get(handoff.responseMessageId!);
+        const expectedResponsePayload = {
+          handoffRequestId: handoff.handoffRequestId,
+          sourceTaskId: sourceTask.taskId,
+          childTaskId: childTask.taskId,
+          status: childTask.status,
+          ...(childTask.status === "completed"
+            ? { result: childTask.result ?? null }
+            : { failureReason: childTask.failureReason }),
+        };
+        if (
+          !responseMessage ||
+          responseMessage.type !== "task_response" ||
+          responseMessage.fromActorId !== handoff.targetActorId ||
+          responseMessage.toActorId !== handoff.sourceActorId ||
+          responseMessage.correlationId !== handoff.handoffRequestId ||
+          responseMessage.causationMessageId !== requestMessage.messageId
+        ) {
+          throw new OrganizationError(
+            "invalid_input",
+            `Handoff ${handoff.handoffRequestId} has an invalid response message`
+          );
+        }
+        assertRecoveryEqual(
+          responseMessage.payload,
+          expectedResponsePayload,
+          `Handoff ${handoff.handoffRequestId} response differs from its child task`
+        );
+        const responseEvents = snapshot.trace.filter(
+          (event) =>
+            event.eventType === "handoff_response_enqueued" &&
+            event.handoffRequestId === handoff.handoffRequestId
+        );
+        if (
+          responseEvents.length !== 1 ||
+          responseEvents[0].actorId !== childTask.assignedTo ||
+          responseEvents[0].taskId !== childTask.taskId ||
+          responseEvents[0].messageId !== responseMessage.messageId ||
+          responseEvents[0].actorRunId !== childTask.actorRunId
+        ) {
+          throw new OrganizationError(
+            "invalid_input",
+            `Handoff ${handoff.handoffRequestId} has an invalid response Organization Trace`
+          );
+        }
+        assertRecoveryEqual(
+          responseEvents[0].data,
+          { sourceTaskId: sourceTask.taskId, status: childTask.status },
+          `Handoff ${handoff.handoffRequestId} response Trace differs from its child task`
+        );
+      } else if (snapshot.trace.some(
+        (event) =>
+          event.eventType === "handoff_response_enqueued" &&
+          event.handoffRequestId === handoff.handoffRequestId
+      )) {
+        throw new OrganizationError(
+          "invalid_input",
+          `Handoff ${handoff.handoffRequestId} has a premature response Trace`
+        );
+      }
+    }
+
+    for (const message of snapshot.messages) {
+      if (!message.correlationId) continue;
+      const handoff = handoffsById.get(message.correlationId);
+      const isCanonicalRequest =
+        message.type === "task_request" &&
+        handoff?.requestMessageId === message.messageId;
+      const isCanonicalResponse =
+        message.type === "task_response" &&
+        handoff?.status === "responded" &&
+        handoff.responseMessageId === message.messageId;
+      if (!handoff || (!isCanonicalRequest && !isCanonicalResponse)) {
+        throw new OrganizationError(
+          "invalid_input",
+          `Correlated message ${message.messageId} is not canonical for its handoff`
+        );
+      }
     }
 
     const memory = snapshot.runtimeRecovery.memory;
@@ -1095,7 +1833,8 @@ export class OrganizationRuntime {
         Boolean(event.actorId && !actorIds.has(event.actorId)) ||
         Boolean(event.taskId && !taskIds.has(event.taskId)) ||
         Boolean(event.messageId && !messageIds.has(event.messageId)) ||
-        Boolean(event.actorRunId && !tasksByRunId.has(event.actorRunId))
+        Boolean(event.actorRunId && !tasksByRunId.has(event.actorRunId)) ||
+        Boolean(event.handoffRequestId && !handoffsById.has(event.handoffRequestId))
       ) {
         throw new OrganizationError("invalid_input", "Organization Trace has invalid references or sequence");
       }
@@ -1109,12 +1848,15 @@ export class OrganizationRuntime {
       actors: new ActorRegistry(organizationId),
       tasks: new TaskManager(organizationId),
       inbox: new ActorInbox(organizationId),
+      handoffs: new OrganizationHandoffRegistry(organizationId),
       trace: new OrganizationTrace(organizationId),
       activeOperations: 0,
+      dispatchLoopActive: false,
     };
     state.actors.restore(snapshot.actors);
     state.tasks.restore(snapshot.tasks, snapshot.taskQueue);
     state.inbox.restore(snapshot.messages, snapshot.inboxOrder);
+    state.handoffs.restore(snapshot.handoffs);
     state.trace.restore(snapshot.trace);
 
     for (const actorRunId of tasksByRunId.keys()) {
@@ -1193,6 +1935,7 @@ export class OrganizationRuntime {
     }
     if (
       state.activeOperations > 0 ||
+      state.dispatchLoopActive ||
       hasActiveOrganizationOperation(organizationId) ||
       state.tasks.list().some((task) => task.status === "running")
     ) {

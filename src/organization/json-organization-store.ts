@@ -8,6 +8,7 @@ import {
   type OrganizationSnapshot,
   type OrganizationStoreSnapshot,
 } from "./organization-snapshot";
+import { normalizeOrganizationStoreSnapshot } from "./organization-snapshot-migration";
 import type { OrganizationStore } from "./organization-store";
 
 function clone<T>(value: T): T {
@@ -32,8 +33,7 @@ export class JsonOrganizationStore implements OrganizationStore {
   private async readStore(): Promise<OrganizationStoreSnapshot> {
     try {
       const parsed: unknown = JSON.parse(await readFile(this.filePath, "utf8"));
-      assertOrganizationStoreSnapshot(parsed);
-      return parsed;
+      return normalizeOrganizationStoreSnapshot(parsed);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         return {
@@ -47,10 +47,15 @@ export class JsonOrganizationStore implements OrganizationStore {
   }
 
   private async writeStore(store: OrganizationStoreSnapshot): Promise<void> {
+    assertOrganizationStoreSnapshot(store);
     await mkdir(dirname(this.filePath), { recursive: true });
     const temporaryPath = `${this.filePath}.${randomUUID()}.tmp`;
-    await writeFile(temporaryPath, JSON.stringify(store, null, 2), "utf8");
-    await rename(temporaryPath, this.filePath);
+    try {
+      await writeFile(temporaryPath, JSON.stringify(store, null, 2), "utf8");
+      await rename(temporaryPath, this.filePath);
+    } finally {
+      await rm(temporaryPath, { force: true });
+    }
   }
 
   async load(organizationId: string): Promise<OrganizationSnapshot | null> {
