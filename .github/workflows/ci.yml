@@ -32,6 +32,12 @@ jobs:
       - name: Dist Runtime Smoke
         run: npm run start:dist
 
+      - name: Dist Handoff Runtime Smoke
+        run: npm run start:dist:handoff
+
+      - name: Dist Organization Handoff Smoke
+        run: npm run start:dist:organization:handoff
+
       - name: Actor Kernel Demo
         run: npm run demo
 
@@ -94,3 +100,12 @@ jobs:
 
       - name: Organization Lifecycle Hardening Demo
         run: npm run demo:organization:lifecycle
+
+      - name: Terminal Handoff Runtime Demo
+        run: npm run demo:handoff:runtime
+
+      - name: Organization Handoff Demo
+        run: npm run demo:organization:handoff
+
+      - name: Organization Handoff Recovery Demo
+        run: npm run demo:organization:handoff:recovery

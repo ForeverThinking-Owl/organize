@@ -8,21 +8,21 @@ README is the project entry point. Version history, verification coverage, and r
 
 ## Current State / 当前状态
 
-Current version: `v0.5.1 — Governance Fail-Closed`
+Current version: `v0.6.0 — Governed Actor Handoff`
 
-当前版本：`v0.5.1 — Governance Fail-Closed`
+当前版本：`v0.6.0 — Governed Actor Handoff`
 
 | Boundary / 边界 | Status / 状态 |
 |---|---|
-| Organization Runtime | Organization-scoped ActorRegistry, capability enforcement, immutable Task state, atomic queue claim, and real ActorRuntime run / continue dispatch are available. / 已支持按组织隔离的 ActorRegistry、能力校验、不可变 Task 状态、原子队列 claim，以及真实 ActorRuntime run / continue 调度。 |
-| Actor Messaging | FIFO Actor Inbox uses explicit queued / delivered / acknowledged states and validates both members and capabilities. / FIFO Actor Inbox 使用显式 queued / delivered / acknowledged 状态，并校验消息双方成员与能力。 |
-| Organization Recovery | OrganizationSnapshot persists Registry, Task Queue, Inbox, Organization Trace, PendingRunSnapshot, and organization/run-partitioned Memory / Trace state; restore preflight validates canonical Actor, Skill, Tool, Task, PendingRun, and Trace consistency. / OrganizationSnapshot 可持久化 Registry、Task Queue、Inbox、Organization Trace、PendingRunSnapshot 与分区 Memory / Trace；恢复 preflight 会校验 canonical Actor、Skill、Tool、Task、PendingRun 与 Trace 一致性。 |
-| Actor Kernel | Single-Actor loop supports ToolCall, tool approval, Skill wait_approval, human input, external event waiting, continue, Trace lifecycle, memory crystallization, store-backed runs, persistent Trace snapshots, persistent pending runs, coordinated recovery bundles, process-boundary recovery validation, and external event safety checks. / 单 Actor 闭环已支持 ToolCall、工具审批、Skill wait_approval、human input、external event waiting、continue、Trace 生命周期、记忆沉淀、Store-backed run、Trace 快照持久化、pending run 持久化、组合恢复包、进程边界恢复验证与外部事件安全校验。 |
+| Organization Runtime | Organization-scoped ActorRegistry, governed terminal handoff, immutable task lineage, correlated request/response messages, bounded dispatch-until-idle, capability enforcement, and real ActorRuntime run / continue dispatch are available. / 已支持按组织隔离的 ActorRegistry、受治理的终态 handoff、不可变任务 lineage、关联 request/response 消息、有界 dispatch-until-idle、能力校验，以及真实 ActorRuntime run / continue 调度。 |
+| Actor Messaging | FIFO Actor Inbox uses explicit queued / delivered / acknowledged states; internal handoff messages have canonical correlation / causation while public send cannot forge them. / FIFO Actor Inbox 使用显式 queued / delivered / acknowledged 状态；内部 handoff 消息具有 canonical correlation / causation，公开发送接口不能伪造这些字段。 |
+| Organization Recovery | OrganizationSnapshot v3 persists Registry, task lineage, Handoff Registry, Inbox, Organization Trace, PendingRunSnapshot, and partitioned Memory / Trace; restore preflight validates their deep cross-references and purely migrates valid v2 checkpoints. / OrganizationSnapshot v3 可持久化 Registry、任务 lineage、Handoff Registry、Inbox、Organization Trace、PendingRunSnapshot 与分区 Memory / Trace；恢复 preflight 深度校验交叉引用，并纯函数迁移合法 v2 checkpoint。 |
+| Actor Kernel | Single-Actor loop supports ToolCall, approvals, human input, external events, continue, terminal `handoff_requested`, Trace lifecycle v2, memory crystallization, store-backed runs, persistent pending runs, and coordinated recovery bundles. / 单 Actor 闭环已支持 ToolCall、审批、human input、external event、continue、终态 `handoff_requested`、Trace 生命周期 v2、记忆沉淀、Store-backed run、pending run 持久化与组合恢复包。 |
 | Waiting / Resume | Human input, Skill approval, ToolCall approval, and external events validate before resume; invalid continuations preserve pending state for a valid retry. / human input、Skill approval、ToolCall approval 与 external event 都在 resume 前校验；非法 continuation 会保留 pending state 供合法重试。 |
 | Tool Governance | Only `beforeCall` approval is implemented; Tool definitions declaring `afterCall` or `beforeWriteback` fail registration before any executor can run. / 当前只实现 `beforeCall` 审批；声明 `afterCall` 或 `beforeWriteback` 的 Tool 会在任何 executor 执行前注册失败。 |
 | External Event Safety | Configured correlation keys and every interpolation token must resolve to non-empty scalars without unresolved templates before suspension; incoming events then validate request id, event name, correlation, and payload schema. / 已声明的 correlation 及其每个插值 token 都必须在 suspend 前解析为无残留模板的非空标量；入站事件随后校验 request id、event name、correlation 与 payload schema。 |
 | Runtime Recovery | `RuntimeRecoveryBundle` coordinates PendingRunSnapshot, TraceSnapshot, and MemorySnapshot across all waiting kinds, including validated external events. / `RuntimeRecoveryBundle` 协调 PendingRunSnapshot、TraceSnapshot、MemorySnapshot，并覆盖通过校验的 external event 等待边界。 |
-| Skill Runtime | Strict step parsing, transform execution, human_input waiting, wait_approval waiting, wait_external_event waiting, return output mapping, and explicit unsupported-step errors are available. / 已支持严格 step 解析、transform 执行、human_input 等待、wait_approval 等待、wait_external_event 等待、return output mapping、未支持步骤显式报错。 |
+| Skill Runtime | Strict step parsing, transform execution, waiting steps, return mapping, and a final-only explicit handoff step with JSON-safe input mapping are available. / 已支持严格 step 解析、transform 执行、等待步骤、return mapping，以及仅可位于末步且具有 JSON-safe input mapping 的显式 handoff。 |
 
 ## Verification Matrix / 验收矩阵
 
@@ -31,6 +31,8 @@ Current version: `v0.5.1 — Governance Fail-Closed`
 | `npm run typecheck` | TypeScript type-check / 类型检查 |
 | `npm run build` | Compile / 编译 |
 | `npm run start:dist` | Compiled output runtime smoke / 编译产物运行冒烟测试 |
+| `npm run start:dist:handoff` | Compiled terminal handoff smoke / 编译产物 handoff 冒烟测试 |
+| `npm run start:dist:organization:handoff` | Compiled governed Organization handoff smoke / 编译产物受治理 Organization handoff 冒烟测试 |
 | `npm run demo` | Actor Kernel demo, 26 checks / Actor Kernel Demo，26 条验收 |
 | `npm run demo:memory` | Hybrid Memory demo, 12 checks / 混合记忆 Demo，12 条验收 |
 | `npm run demo:memory:persistence` | MemorySnapshot demo, 10 checks / 记忆快照 Demo，10 条验收 |
@@ -52,6 +54,39 @@ Current version: `v0.5.1 — Governance Fail-Closed`
 | `npm run demo:organization:recovery` | Organization Recovery demo, 44 checks / Organization Recovery Demo，44 条验收 |
 | `npm run demo:organization:pending:recovery` | Four pending kinds recovery demo, 21 checks / 四类 pending 恢复 Demo，21 条验收 |
 | `npm run demo:organization:lifecycle` | In-flight lifecycle hardening demo, 19 checks / 运行中生命周期加固 Demo，19 条验收 |
+| `npm run demo:handoff:runtime` | Terminal Actor Handoff demo, 26 checks / 终态 Actor Handoff Demo，26 条验收 |
+| `npm run demo:organization:handoff` | Governed Organization Handoff demo, 43 checks / 受治理 Organization Handoff Demo，43 条验收 |
+| `npm run demo:organization:handoff:recovery` | Handoff Recovery v3 and migration demo, 53 checks / Handoff Recovery v3 与迁移 Demo，53 条验收 |
+
+---
+
+## v0.6.0 — Governed Actor Handoff
+
+- Add a strict final-only Skill `handoff` step with explicit target Actor / Skill, reason, JSON-safe input mapping, and a terminal `handoff_requested` ActorRuntime result. A handoff is never a PendingRun and never emits `final_output`.
+- Upgrade Actor Trace to `trace.snapshot.v2`; valid v1 snapshots normalize purely, while v2 lifecycle validation binds exactly one handoff event to a terminal handoff run.
+- Materialize an accepted handoff atomically as a `delegated` source task, one depth-1 queued child task, one fingerprinted registry record, and one canonical correlated `task_request`.
+- Enforce source `task:delegate` / `message:receive`, target `task:execute` / `message:receive`, active membership, explicit Skill ownership, no self-handoff, and `MAX_HANDOFF_DEPTH = 1` before leaving any organization artifact.
+- Deliver and acknowledge the exact request before child execution. A terminal child produces exactly one correlated / caused `task_response`; the source task stays delegated and its terminal Actor run is never resumed.
+- Add bounded `dispatchUntilIdle()` orchestration with explicit idle / dispatch-limit results and blocked waiting-task reporting. It is not a daemon or durable queue worker.
+- Upgrade Organization snapshot/store to v3 with task lineage and Handoff Registry state. Recovery deeply cross-validates Task, Actor/Skill, handoff fingerprint, canonical messages, Organization Trace, Actor Trace, PendingRun, Memory, and response lifecycle before commit.
+- Add a pure v2-to-v3 Organization migration plus nested Trace v1-to-v2 normalization. Mixed-version envelopes, future versions, and legacy snapshots containing v3-only handoff metadata fail closed.
+- Preserve at-least-once recovery semantics. Stable IDs and fingerprints make artifacts idempotent inside one loaded aggregate, but crash-safe exactly-once still requires a host transactional outbox or durable idempotency store.
+- Add dedicated Runtime (26 checks), governed Organization (43 checks), and recovery/tamper (53 checks) handoff demos. The 24 CI demos now cover 630 unique checks and include compiled Runtime and Organization handoff smokes.
+- Synchronize package / lockfile / Docker Compose metadata at v0.6.0.
+
+中文：
+
+- 新增严格的末步 `handoff` Skill step，显式声明目标 Actor / Skill、reason 与 JSON-safe input mapping；ActorRuntime 以终态 `handoff_requested` 返回。handoff 从不成为 PendingRun，也不产生 `final_output`。
+- Actor Trace 升级为 `trace.snapshot.v2`；合法 v1 快照通过纯函数 normalize，v2 生命周期校验将唯一 handoff 事件绑定到终态 handoff run。
+- 被接受的 handoff 会原子物化为 `delegated` 源任务、一个 depth-1 queued 子任务、一条带 fingerprint 的 registry 记录和一条 canonical correlated `task_request`。
+- 在留下任何组织 artifact 前，强制校验源端 `task:delegate` / `message:receive`、目标端 `task:execute` / `message:receive`、active 成员、显式 Skill ownership、禁止 self-handoff，并限制 `MAX_HANDOFF_DEPTH = 1`。
+- 子任务执行前精确 deliver / acknowledge 对应 request。子任务终止后仅产生一条具有 correlation / causation 的 `task_response`；源任务保持 delegated，终态源 Actor run 永不恢复。
+- 新增有界 `dispatchUntilIdle()`，明确返回 idle / dispatch-limit 与 blocked waiting tasks；它不是 daemon 或持久队列 worker。
+- Organization snapshot/store 升级为 v3，保存任务 lineage 与 Handoff Registry。恢复提交前深度交叉校验 Task、Actor/Skill、handoff fingerprint、canonical messages、Organization Trace、Actor Trace、PendingRun、Memory 与 response 生命周期。
+- 新增纯函数 Organization v2→v3 迁移及嵌套 Trace v1→v2 normalize；混合版本 envelope、未来版本和在旧快照中夹带 v3-only handoff 元数据都会 fail closed。
+- 保持 at-least-once 恢复语义。稳定 ID 与 fingerprint 可保证单个已加载 aggregate 内的 artifact 幂等，但崩溃安全的 exactly-once 仍需宿主提供 transactional outbox 或持久幂等存储。
+- 新增 Runtime（26 条）、受治理 Organization（43 条）与 recovery/tamper（53 条）三条 handoff Demo；24 个 CI Demo 现共覆盖 630 条独立检查，并包含 Runtime/Organization 编译产物 handoff smoke。
+- package、lockfile 与 Docker Compose 元数据同步到 v0.6.0。
 
 ---
 
