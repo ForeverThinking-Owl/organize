@@ -11,6 +11,7 @@ import {
   ToolCallStep,
   LLMJudgeStep,
   TransformStep,
+  HandoffStep,
   HumanInputStep,
   WaitApprovalStep,
   WaitExternalEventStep,
@@ -62,6 +63,9 @@ import {
   claimStandaloneOrganizationRun,
   releaseStandaloneOrganizationRun,
 } from "../organization/organization-operation-lease";
+import type { HandoffRequest } from "./handoff-runtime";
+
+export type { HandoffRequest } from "./handoff-runtime";
 
 export interface ActorRuntimeOptions {
   memoryStore?: MemoryStore;
@@ -77,7 +81,7 @@ export interface ActorRunInput {
   runtimeOptions?: ActorRuntimeOptions;
 }
 
-export type ActorRunStatus = "completed" | "waiting_approval" | "waiting_human_input" | "waiting_external_event" | "error";
+export type ActorRunStatus = "completed" | "handoff_requested" | "waiting_approval" | "waiting_human_input" | "waiting_external_event" | "error";
 
 export interface PendingApprovalOutput {
   approvalRequestId: string;
@@ -92,6 +96,7 @@ export interface ActorRunOutput {
   actorRunId: string;
   status: ActorRunStatus;
   result: Record<string, unknown> | null;
+  handoffRequest?: HandoffRequest;
   pendingApproval?: PendingApprovalOutput;
   pendingHumanInput?: HumanInputRequest;
   pendingExternalEvent?: ExternalEventRequest;
@@ -885,6 +890,7 @@ export class ActorRuntime {
     memoryStore?: MemoryStore
   ): Promise<ActorRunOutput> {
     let finalResult: Record<string, unknown> | null = null;
+    let handoffRequest: HandoffRequest | undefined;
 
     while (state.status === "running") {
       const step = skillRuntime.getCurrentStep(skill, state);
@@ -936,6 +942,10 @@ export class ActorRuntime {
         skillRuntime.executeLLMJudge(judgeStep, state, actorRunId, judgeResult);
       }
 
+      if (step.type === "handoff") {
+        skillRuntime.startHandoffStep(step as HandoffStep, actorRunId);
+      }
+
       let prebuiltRequest: ToolCallRequest | undefined;
       if (step.type === "tool_call") {
         const toolStep = step as ToolCallStep;
@@ -968,7 +978,11 @@ export class ActorRuntime {
           state.status = "completed";
           break;
         }
-        case "handoff": break;
+        case "handoff": {
+          handoffRequest = execResult.handoffRequest;
+          state.status = "handoff_requested";
+          break;
+        }
         case "error": {
           state.status = "error";
           traceLogger.record(actorRunId, "error", { message: execResult.reason });
@@ -1006,16 +1020,43 @@ export class ActorRuntime {
       context.actor.organizationId,
       memoryStore
     );
-    if (!memorySaved) state.status = "error";
+    if (!memorySaved) {
+      state.status = "error";
+      handoffRequest = undefined;
+    } else if (state.status === "handoff_requested" && handoffRequest) {
+      traceLogger.record(
+        actorRunId,
+        "handoff",
+        handoffRequest as unknown as Record<string, unknown>
+      );
+      skillRuntime.completeHandoffStep(
+        skill.steps[state.currentStepIndex] as HandoffStep,
+        actorRunId
+      );
+    }
 
-    const endStatus: "completed" | "error" = state.status === "completed" ? "completed" : "error";
+    const endStatus: "completed" | "handoff_requested" | "error" =
+      state.status === "completed"
+        ? "completed"
+        : state.status === "handoff_requested"
+          ? "handoff_requested"
+          : "error";
     traceLogger.endRun(actorRunId, endStatus);
 
     actorDecisionExecutor.removeRun(actorRunId);
     this.runs.delete(actorRunId);
     releaseStandaloneOrganizationRun(context.actor.organizationId, actorRunId);
 
-    return this.buildOutput(actorRunId, endStatus, finalResult, undefined, memoryCandidates);
+    return this.buildOutput(
+      actorRunId,
+      endStatus,
+      finalResult,
+      undefined,
+      memoryCandidates,
+      undefined,
+      undefined,
+      handoffRequest
+    );
   }
 
   private buildPendingApprovalOutput(pendingApproval: ApprovalRequest | SkillApprovalRequest): PendingApprovalOutput {
@@ -1036,7 +1077,8 @@ export class ActorRuntime {
     pendingApproval?: ApprovalRequest | SkillApprovalRequest,
     memoryCandidates?: Array<{ candidateId: string; scope: string; type: string; content: string; confidence?: number }>,
     pendingHumanInput?: HumanInputRequest,
-    pendingExternalEvent?: ExternalEventRequest
+    pendingExternalEvent?: ExternalEventRequest,
+    handoffRequest?: HandoffRequest
   ): ActorRunOutput {
     const trace = traceLogger.getTrace(actorRunId)!;
     const toolCalls = trace.events
@@ -1068,6 +1110,7 @@ export class ActorRuntime {
       pendingApproval: pendingApproval ? this.buildPendingApprovalOutput(pendingApproval) : undefined,
       pendingHumanInput,
       pendingExternalEvent,
+      handoffRequest,
       toolCalls,
       approvals,
       memoryCandidates: memoryCandidates ?? [],

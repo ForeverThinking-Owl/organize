@@ -22,6 +22,7 @@ export type SkillStep =
   | LLMJudgeStep
   | TransformStep
   | ReturnStep
+  | HandoffStep
   | HumanInputStep
   | WaitApprovalStep
   | WaitExternalEventStep
@@ -56,6 +57,19 @@ export interface TransformStep extends SkillStepBase {
 export interface ReturnStep extends SkillStepBase {
   type: "return";
   outputMapping?: Record<string, string>;
+}
+
+/**
+ * End the current Actor run and request an explicitly addressed Actor/Skill
+ * handoff. Organization-level routing and governance happen outside the
+ * ActorRuntime.
+ */
+export interface HandoffStep extends SkillStepBase {
+  type: "handoff";
+  targetActorId: string;
+  targetSkillId: string;
+  reason: string;
+  inputMapping: Record<string, string>;
 }
 
 export interface HumanInputStep extends SkillStepBase {

@@ -74,7 +74,7 @@ export function assertPendingStateTraceConsistency(
     const isCurrent = index === currentIndex;
     const currentHasResult = isCurrent && step.type === "llm_judge";
     if (isCurrent && !currentHasResult) break;
-    if (step.type === "return" || step.type === "end") {
+    if (step.type === "return" || step.type === "handoff" || step.type === "end") {
       invalid(`terminal step ${step.stepKey} appears before a pending wait`);
     }
 

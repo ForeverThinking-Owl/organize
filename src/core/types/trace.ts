@@ -64,6 +64,6 @@ export interface ActorRunTrace {
   skillId: string;
   startedAt: string;
   endedAt?: string;
-  status: "running" | "completed" | "waiting_approval" | "waiting_human_input" | "waiting_external_event" | "error";
+  status: "running" | "completed" | "handoff_requested" | "waiting_approval" | "waiting_human_input" | "waiting_external_event" | "error";
   events: TraceEvent[];
 }

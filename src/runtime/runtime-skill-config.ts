@@ -1,5 +1,6 @@
 import type {
   EndStep,
+  HandoffStep,
   HumanInputStep,
   LLMJudgeStep,
   ReturnStep,
@@ -65,6 +66,7 @@ function assertSkillStepShape(config: SkillStepConfig, index: number): void {
     llm_judge: ["instruction", "output_key", "output_schema"],
     transform: ["mapping", "output_key"],
     return: ["output_mapping"],
+    handoff: ["target_actor_id", "target_skill_id", "reason", "input_mapping"],
     human_input: ["prompt", "output_key"],
     wait_approval: ["approval_request_id", "reason", "output_key"],
     wait_external_event: ["event_name", "correlation_key", "reason", "output_key", "event_schema"],
@@ -194,6 +196,15 @@ export function parseSkillStepConfig(config: SkillStepConfig): SkillStep {
         type: "return",
         outputMapping: optionalMapping(config, "output_mapping"),
       } as ReturnStep;
+    case "handoff":
+      return {
+        ...base,
+        type: "handoff",
+        targetActorId: requiredString(config, "target_actor_id"),
+        targetSkillId: requiredString(config, "target_skill_id"),
+        reason: requiredString(config, "reason"),
+        inputMapping: requiredMapping(config, "input_mapping"),
+      } as HandoffStep;
     case "human_input":
       return {
         ...base,
@@ -238,6 +249,12 @@ export function parseSkillConfig(config: SkillConfig, actorId: string): Skill {
       throw new Error(`Skill ${config.skill_id} contains duplicate step_key ${step.stepKey}`);
     }
     stepKeys.add(step.stepKey);
+  }
+  const handoffIndex = steps.findIndex((step) => step.type === "handoff");
+  if (handoffIndex !== -1 && handoffIndex !== steps.length - 1) {
+    throw new Error(
+      `Skill ${config.skill_id} handoff step ${steps[handoffIndex].stepKey} must be the final step`
+    );
   }
   return {
     skillId: config.skill_id,

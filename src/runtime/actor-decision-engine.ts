@@ -5,10 +5,11 @@
 
 import {
   ActorDecision,
+  HandoffDecision,
   ToolCallDecision,
   FinalOutputDecision,
 } from "../core/types/actor-decision";
-import { SkillStep, ToolCallStep, LLMJudgeStep, ReturnStep } from "../core/types/skill";
+import { SkillStep, ToolCallStep, LLMJudgeStep, ReturnStep, HandoffStep } from "../core/types/skill";
 import { ActorContext } from "../core/types/actor";
 import { ToolCallRequest } from "../core/types/tool";
 import { SkillState, resolveTemplateValue } from "./skill-runtime";
@@ -16,6 +17,7 @@ import { traceLogger } from "../trace/trace-logger";
 import { llmGateway } from "../llm/llm-gateway";
 import { buildActorJudgePrompt } from "../llm/prompts/actor-judge.prompt";
 import { buildCanonicalPendingToolDescriptor } from "./pending-tool-descriptor";
+import { buildHandoffContext } from "./handoff-runtime";
 
 export const DEFAULT_TRIAGE_OUTPUT_SCHEMA: Record<string, unknown> = {
   type: "object",
@@ -111,6 +113,9 @@ export class ActorDecisionEngine {
 
       case "return":
         return this.decideReturn(step as ReturnStep, state, actorRunId);
+
+      case "handoff":
+        return this.decideHandoff(step as HandoffStep, state, actorRunId);
 
       default:
         throw new Error(`Unsupported decision step type: ${step.type}`);
@@ -229,6 +234,34 @@ export class ActorDecisionEngine {
         ? "Skill return 使用 outputMapping 生成最终输出"
         : "Skill 所有步骤执行完成，输出汇总结果",
       result,
+    };
+  }
+
+  private decideHandoff(
+    step: HandoffStep,
+    state: SkillState,
+    actorRunId: string
+  ): HandoffDecision {
+    // Resolve before writing either decision or handoff audit events. A bad
+    // mapping therefore fails closed without emitting a routable request.
+    const handoffContext = buildHandoffContext(step, state);
+
+    traceLogger.record(actorRunId, "decision_generated", {
+      stepKey: step.stepKey,
+      decisionType: "handoff",
+      targetActorId: step.targetActorId,
+      targetSkillId: step.targetSkillId,
+      reason: step.reason,
+      handoffContext,
+    });
+
+    return {
+      decisionType: "handoff",
+      reasoningSummary: `Skill handoff ${step.stepKey} → ${step.targetActorId}/${step.targetSkillId}`,
+      targetActorId: step.targetActorId,
+      targetSkillId: step.targetSkillId,
+      reason: step.reason,
+      handoffContext,
     };
   }
 }
