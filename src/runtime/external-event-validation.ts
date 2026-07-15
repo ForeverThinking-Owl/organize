@@ -67,10 +67,67 @@ export function validateExternalEventPayload(
   return { valid: errors.length === 0, errors };
 }
 
+/**
+ * Validate the result of resolving a configured external-event correlation key.
+ *
+ * An omitted correlation key remains supported. Once a Skill configures one,
+ * however, the runtime must not wait on a missing, blank, or partially resolved
+ * value: accepting the placeholder itself would let an event correlate by
+ * repeating that same placeholder verbatim.
+ */
+export function validateResolvedExternalEventCorrelationKey(
+  correlationKey: unknown,
+  configured: boolean
+): ExternalEventValidationResult {
+  if (!configured) return { valid: true, errors: [] };
+
+  if (correlationKey === undefined || correlationKey === null) {
+    return {
+      valid: false,
+      errors: ["configured correlationKey did not resolve to a value"],
+    };
+  }
+
+  if (
+    typeof correlationKey !== "string" &&
+    typeof correlationKey !== "number" &&
+    typeof correlationKey !== "boolean"
+  ) {
+    return {
+      valid: false,
+      errors: ["configured correlationKey must resolve to a string, number, or boolean"],
+    };
+  }
+
+  const normalized = String(correlationKey);
+  if (normalized.trim().length === 0) {
+    return {
+      valid: false,
+      errors: ["configured correlationKey resolved to an empty string"],
+    };
+  }
+
+  if (normalized.includes("{{") || normalized.includes("}}")) {
+    return {
+      valid: false,
+      errors: ["configured correlationKey contains an unresolved template"],
+    };
+  }
+
+  return { valid: true, errors: [] };
+}
+
 export function validateExternalEventCorrelation(
   request: ExternalEventRequest,
   event: ExternalEventReceived
 ): ExternalEventValidationResult {
+  const configured = request.correlationKey !== undefined;
+  const requestValidation = validateResolvedExternalEventCorrelationKey(
+    request.correlationKey,
+    configured
+  );
+  if (!requestValidation.valid) return requestValidation;
+
   if (request.correlationKey === undefined) return { valid: true, errors: [] };
 
   if (event.correlationKey === undefined) {

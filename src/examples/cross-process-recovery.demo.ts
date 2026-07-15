@@ -7,8 +7,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, resolve } from "node:path";
 import { actorRuntime } from "../runtime/actor-runtime";
 import { toolGateway } from "../tools/tool-gateway";
 import {
@@ -359,8 +358,13 @@ async function runRestorePhase(kind: RecoveryKind, storePath: string, actorRunId
 }
 
 function runChildProcess(args: string[]): SaveSummary | RestoreSummary {
-  const scriptPath = fileURLToPath(import.meta.url);
-  const result = spawnSync(process.execPath, ["--import", "tsx", scriptPath, ...args], {
+  const entryPath = process.argv[1];
+  if (!entryPath) throw new Error("Expected demo entry path");
+  const scriptPath = resolve(entryPath);
+  const childArgs = scriptPath.endsWith(".ts")
+    ? ["--import", "tsx", scriptPath, ...args]
+    : [scriptPath, ...args];
+  const result = spawnSync(process.execPath, childArgs, {
     cwd: process.cwd(),
     encoding: "utf8",
     env: process.env,

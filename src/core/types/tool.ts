@@ -22,7 +22,9 @@ export interface ToolDefinition {
  */
 export interface ToolApprovalPolicy {
   beforeCall?: ApprovalStagePolicy;
+  /** Reserved for a future runtime stage; Tool registration currently rejects it. */
   afterCall?: ApprovalStagePolicy;
+  /** Reserved for a future runtime stage; Tool registration currently rejects it. */
   beforeWriteback?: ApprovalStagePolicy;
 }
 
