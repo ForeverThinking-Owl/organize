@@ -1,6 +1,6 @@
 {
   "name": "@foreverthinking/organize",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Self-Operating Organization Actor Kernel",
   "private": true,
   "scripts": {
@@ -27,8 +27,13 @@
     "demo:organization:recovery": "tsx src/examples/organization-recovery.demo.ts",
     "demo:organization:pending:recovery": "tsx src/examples/organization-pending-recovery.demo.ts",
     "demo:organization:lifecycle": "tsx src/examples/organization-lifecycle-hardening.demo.ts",
+    "demo:handoff:runtime": "node --import tsx src/examples/handoff-runtime.demo.ts",
+    "demo:organization:handoff": "node --import tsx src/examples/organization-handoff.demo.ts",
+    "demo:organization:handoff:recovery": "node --import tsx src/examples/organization-handoff-recovery.demo.ts",
     "build": "tsc",
     "start:dist": "node dist/examples/customer-after-sales.demo.js",
+    "start:dist:handoff": "node dist/examples/handoff-runtime.demo.js",
+    "start:dist:organization:handoff": "node dist/examples/organization-handoff.demo.js",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

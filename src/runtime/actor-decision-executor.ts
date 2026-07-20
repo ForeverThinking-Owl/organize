@@ -20,6 +20,10 @@ import { approvalGate } from "../approvals/approval-gate";
 import { toolGateway } from "../tools/tool-gateway";
 import { validateToolArguments } from "../tools/tool-schema-validation";
 import { traceLogger } from "../trace/trace-logger";
+import {
+  createHandoffRequest,
+  type HandoffRequest,
+} from "./handoff-runtime";
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -29,7 +33,7 @@ export type ExecutionResult =
   | { outcome: "completed"; observation?: ToolObservation }
   | { outcome: "final_output"; result: Record<string, unknown> }
   | { outcome: "waiting_approval"; approvalRequest: ApprovalRequest; pendingToolCall: ToolCallReq }
-  | { outcome: "handoff"; targetRole: string; targetSkill: string }
+  | { outcome: "handoff"; handoffRequest: HandoffRequest }
   | { outcome: "error"; reason: string };
 
 export interface PendingExecution {
@@ -91,7 +95,13 @@ export class ActorDecisionExecutor {
       case "request_approval":
         return this.executeRequestApproval(decision, actorRunId);
       case "handoff":
-        return this.executeHandoff(decision, actorRunId);
+        return this.executeHandoff(
+          decision,
+          actorRunId,
+          actorId,
+          state.skillId,
+          originating?.stepKey
+        );
       case "final_output":
         return this.executeFinalOutput(decision, actorRunId);
       default:
@@ -272,13 +282,22 @@ export class ActorDecisionExecutor {
 
   private executeHandoff(
     decision: ActorDecision & { decisionType: "handoff" },
-    actorRunId: string
+    actorRunId: string,
+    sourceActorId: string,
+    sourceSkillId: string,
+    stepKey?: string
   ): ExecutionResult {
-    traceLogger.record(actorRunId, "handoff", {
-      targetRole: decision.targetRole,
-      targetSkill: decision.targetSkill,
+    if (!stepKey) {
+      return { outcome: "error", reason: "Handoff decision requires an originating stepKey" };
+    }
+    const handoffRequest = createHandoffRequest({
+      decision,
+      actorRunId,
+      sourceActorId,
+      sourceSkillId,
+      stepKey,
     });
-    return { outcome: "handoff", targetRole: decision.targetRole, targetSkill: decision.targetSkill };
+    return { outcome: "handoff", handoffRequest };
   }
 
   private executeFinalOutput(

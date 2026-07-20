@@ -8,6 +8,7 @@ import { TraceEvent, TraceEventType, ActorRunTrace } from "../core/types/trace";
 import {
   TRACE_SNAPSHOT_SCHEMA_VERSION,
   assertTraceSnapshot,
+  normalizeTraceSnapshot,
   type TraceSnapshot,
 } from "./trace-snapshot";
 
@@ -15,7 +16,7 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-export type RunTerminalStatus = "completed" | "error";
+export type RunTerminalStatus = "completed" | "handoff_requested" | "error";
 export type RunWaitingStatus = "waiting_approval" | "waiting_human_input" | "waiting_external_event";
 
 export class TraceLogger {
@@ -115,21 +116,21 @@ export class TraceLogger {
   }
 
   restoreSnapshot(snapshot: TraceSnapshot): void {
-    assertTraceSnapshot(snapshot);
+    const normalized = normalizeTraceSnapshot(snapshot);
 
-    const traces = cloneJson(snapshot.traces);
+    const traces = cloneJson(normalized.traces);
     this.traces = new Map(traces.map((trace) => [trace.actorRunId, trace]));
   }
 
   /** Upsert selected run traces without replacing unrelated process state. */
   restoreRunsSnapshot(snapshot: TraceSnapshot): void {
-    assertTraceSnapshot(snapshot);
+    const normalized = normalizeTraceSnapshot(snapshot);
 
-    const incoming = cloneJson(snapshot.traces);
+    const incoming = cloneJson(normalized.traces);
     const incomingRunIds = new Set(incoming.map((trace) => trace.actorRunId));
     assertTraceSnapshot({
       schemaVersion: TRACE_SNAPSHOT_SCHEMA_VERSION,
-      savedAt: snapshot.savedAt,
+      savedAt: normalized.savedAt,
       traces: [
         ...cloneJson(this.getAllTraces().filter((trace) => !incomingRunIds.has(trace.actorRunId))),
         ...incoming,

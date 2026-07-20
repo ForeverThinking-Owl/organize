@@ -5,6 +5,7 @@ export const ORGANIZATION_CAPABILITIES = [
   "task:create",
   "task:assign",
   "task:execute",
+  "task:delegate",
   "message:send",
   "message:receive",
   "organization:snapshot",

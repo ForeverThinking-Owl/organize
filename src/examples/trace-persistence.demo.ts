@@ -275,7 +275,7 @@ async function main() {
         detail: "hasCompletedEnd=" + hasCompletedEnd(originalTrace),
       },
       {
-        label: "dumpSnapshot 导出 trace.snapshot.v1",
+        label: "dumpSnapshot 导出 trace.snapshot.v2",
         pass: snapshot.schemaVersion === TRACE_SNAPSHOT_SCHEMA_VERSION && snapshot.traces.length === 1,
         detail: "schema=" + snapshot.schemaVersion + ", traces=" + snapshot.traces.length,
       },

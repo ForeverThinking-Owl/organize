@@ -66,8 +66,8 @@ export interface RequestApprovalDecision extends DecisionBase {
 
 export interface HandoffDecision extends DecisionBase {
   decisionType: "handoff";
-  targetRole: string;
-  targetSkill: string;
+  targetActorId: string;
+  targetSkillId: string;
   reason: string;
   handoffContext: Record<string, unknown>;
 }

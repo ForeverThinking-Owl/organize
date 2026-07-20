@@ -1,9 +1,9 @@
 services:
   demo:
     build: .
-    image: organize:0.5.1
+    image: organize:0.6.0
 
   typecheck:
     build: .
-    image: organize:0.5.1
+    image: organize:0.6.0
     command: ["npx", "tsc", "--noEmit"]

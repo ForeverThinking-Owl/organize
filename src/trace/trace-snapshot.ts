@@ -5,12 +5,19 @@
 
 import type { ActorRunTrace, TraceEventType } from "../core/types/trace";
 
-export const TRACE_SNAPSHOT_SCHEMA_VERSION = "trace.snapshot.v1";
+export const LEGACY_TRACE_SNAPSHOT_SCHEMA_VERSION = "trace.snapshot.v1";
+export const TRACE_SNAPSHOT_SCHEMA_VERSION = "trace.snapshot.v2";
 
 export interface TraceSnapshot {
-  schemaVersion: typeof TRACE_SNAPSHOT_SCHEMA_VERSION;
+  schemaVersion:
+    | typeof TRACE_SNAPSHOT_SCHEMA_VERSION
+    | typeof LEGACY_TRACE_SNAPSHOT_SCHEMA_VERSION;
   savedAt: string;
   traces: ActorRunTrace[];
+}
+
+export interface NormalizedTraceSnapshot extends TraceSnapshot {
+  schemaVersion: typeof TRACE_SNAPSHOT_SCHEMA_VERSION;
 }
 
 const TRACE_EVENT_TYPES = new Set<TraceEventType>([
@@ -57,6 +64,12 @@ const WAITING_STATUSES = new Set<ActorRunTrace["status"]>([
 ]);
 
 const TERMINAL_STATUSES = new Set<ActorRunTrace["status"]>([
+  "completed",
+  "handoff_requested",
+  "error",
+]);
+
+const LEGACY_TERMINAL_STATUSES = new Set<ActorRunTrace["status"]>([
   "completed",
   "error",
 ]);
@@ -111,9 +124,64 @@ function assertJsonSafe(value: unknown, path: string, ancestors = new Set<object
   ancestors.delete(value);
 }
 
-function assertTraceLifecycle(trace: ActorRunTrace, traceIndex: number): void {
+function assertHandoffRequestData(
+  trace: ActorRunTrace,
+  traceIndex: number,
+  eventIndex: number,
+  data: Record<string, unknown>,
+  eventStepKey: string | undefined
+): void {
+  const path = `traces[${traceIndex}].events[${eventIndex}].data`;
+  const requiredFields = [
+    "handoffRequestId",
+    "actorRunId",
+    "sourceActorId",
+    "sourceSkillId",
+    "stepKey",
+    "targetActorId",
+    "targetSkillId",
+    "reason",
+    "handoffContext",
+  ] as const;
+  const allowed = new Set<string>(requiredFields);
+  for (const field of requiredFields) {
+    if (!Object.prototype.hasOwnProperty.call(data, field)) {
+      throw new Error(`Invalid TraceSnapshot: ${path}.${field} is required`);
+    }
+  }
+  for (const field of Object.keys(data)) {
+    if (!allowed.has(field)) {
+      throw new Error(`Invalid TraceSnapshot: ${path}.${field} is not supported`);
+    }
+  }
+  for (const field of requiredFields.slice(0, 8)) {
+    assertNonEmptyString(data[field], `${path}.${field}`);
+  }
+  if (!isRecord(data.handoffContext)) {
+    throw new Error(`Invalid TraceSnapshot: ${path}.handoffContext must be an object`);
+  }
+  if (
+    data.actorRunId !== trace.actorRunId ||
+    data.sourceActorId !== trace.actorId ||
+    data.sourceSkillId !== trace.skillId ||
+    data.stepKey !== eventStepKey
+  ) {
+    throw new Error(`Invalid TraceSnapshot: ${path} identity does not match its trace event`);
+  }
+}
+
+function assertTraceLifecycle(
+  trace: ActorRunTrace,
+  traceIndex: number,
+  schemaVersion: TraceSnapshot["schemaVersion"]
+): void {
   const path = `traces[${traceIndex}]`;
   let lifecycle: LifecycleStatus = "not_started";
+  const terminalStatuses = schemaVersion === TRACE_SNAPSHOT_SCHEMA_VERSION
+    ? TERMINAL_STATUSES
+    : LEGACY_TERMINAL_STATUSES;
+  const handoffEvents: Array<{ index: number; data: Record<string, unknown>; stepKey?: string }> = [];
+  let finalOutputCount = 0;
 
   for (const [eventIndex, event] of trace.events.entries()) {
     const eventPath = `${path}.events[${eventIndex}]`;
@@ -148,7 +216,7 @@ function assertTraceLifecycle(trace: ActorRunTrace, traceIndex: number): void {
         const terminalStatus = event.data.status;
         if (
           lifecycle !== "running" ||
-          !TERMINAL_STATUSES.has(terminalStatus as ActorRunTrace["status"])
+          !terminalStatuses.has(terminalStatus as ActorRunTrace["status"])
         ) {
           throw new Error(`Invalid TraceSnapshot: ${eventPath} has an invalid terminal transition`);
         }
@@ -157,7 +225,7 @@ function assertTraceLifecycle(trace: ActorRunTrace, traceIndex: number): void {
       }
 
       default:
-        if (lifecycle === "not_started" || TERMINAL_STATUSES.has(lifecycle as ActorRunTrace["status"])) {
+        if (lifecycle === "not_started" || terminalStatuses.has(lifecycle as ActorRunTrace["status"])) {
           throw new Error(`Invalid TraceSnapshot: ${eventPath} occurs outside an active run`);
         }
         if (
@@ -183,6 +251,10 @@ function assertTraceLifecycle(trace: ActorRunTrace, traceIndex: number): void {
             throw new Error(`Invalid TraceSnapshot: ${eventPath} occurs while the run is waiting`);
           }
         }
+        if (event.eventType === "handoff") {
+          handoffEvents.push({ index: eventIndex, data: event.data, stepKey: event.stepKey });
+        }
+        if (event.eventType === "final_output") finalOutputCount += 1;
     }
   }
 
@@ -192,16 +264,43 @@ function assertTraceLifecycle(trace: ActorRunTrace, traceIndex: number): void {
   if (trace.status !== lifecycle) {
     throw new Error(`Invalid TraceSnapshot: ${path}.status does not match its lifecycle`);
   }
-  if (TERMINAL_STATUSES.has(trace.status)) {
+  if (terminalStatuses.has(trace.status)) {
     assertNonEmptyString(trace.endedAt, `${path}.endedAt`);
   } else if (trace.endedAt !== undefined) {
     throw new Error(`Invalid TraceSnapshot: ${path}.endedAt is only valid for a terminal run`);
+  }
+
+  if (trace.status === "handoff_requested") {
+    if (
+      schemaVersion !== TRACE_SNAPSHOT_SCHEMA_VERSION ||
+      handoffEvents.length !== 1 ||
+      finalOutputCount !== 0
+    ) {
+      throw new Error(`Invalid TraceSnapshot: ${path} must contain exactly one terminal handoff event`);
+    }
+    const handoff = handoffEvents[0];
+    assertHandoffRequestData(
+      trace,
+      traceIndex,
+      handoff.index,
+      handoff.data,
+      handoff.stepKey
+    );
+  } else if (
+    schemaVersion === TRACE_SNAPSHOT_SCHEMA_VERSION &&
+    handoffEvents.length !== 0
+  ) {
+    throw new Error(`Invalid TraceSnapshot: ${path} has a handoff event without a handoff terminal status`);
   }
 }
 
 /** Validate a TraceSnapshot before it can replace or join live Trace state. */
 export function assertTraceSnapshot(snapshot: unknown): asserts snapshot is TraceSnapshot {
-  if (!isRecord(snapshot) || snapshot.schemaVersion !== TRACE_SNAPSHOT_SCHEMA_VERSION) {
+  if (
+    !isRecord(snapshot) ||
+    (snapshot.schemaVersion !== TRACE_SNAPSHOT_SCHEMA_VERSION &&
+      snapshot.schemaVersion !== LEGACY_TRACE_SNAPSHOT_SCHEMA_VERSION)
+  ) {
     throw new Error("Invalid TraceSnapshot: unsupported schemaVersion " +
       String(isRecord(snapshot) ? snapshot.schemaVersion : undefined));
   }
@@ -224,7 +323,10 @@ export function assertTraceSnapshot(snapshot: unknown): asserts snapshot is Trac
       throw new Error(`Invalid TraceSnapshot: duplicate actorRunId ${candidate.actorRunId}`);
     }
     actorRunIds.add(candidate.actorRunId);
-    if (!["running", ...WAITING_STATUSES, ...TERMINAL_STATUSES].includes(
+    const terminalStatuses = snapshot.schemaVersion === TRACE_SNAPSHOT_SCHEMA_VERSION
+      ? TERMINAL_STATUSES
+      : LEGACY_TERMINAL_STATUSES;
+    if (!["running", ...WAITING_STATUSES, ...terminalStatuses].includes(
       candidate.status as ActorRunTrace["status"]
     )) {
       throw new Error(`Invalid TraceSnapshot: ${path}.status is invalid`);
@@ -266,6 +368,22 @@ export function assertTraceSnapshot(snapshot: unknown): asserts snapshot is Trac
       assertJsonSafe(event.data, `${eventPath}.data`);
     }
 
-    assertTraceLifecycle(candidate as unknown as ActorRunTrace, traceIndex);
+    assertTraceLifecycle(
+      candidate as unknown as ActorRunTrace,
+      traceIndex,
+      snapshot.schemaVersion
+    );
   }
+}
+
+/** Validate either supported schema and detach it as the latest v2 shape. */
+export function normalizeTraceSnapshot(snapshot: unknown): NormalizedTraceSnapshot {
+  assertTraceSnapshot(snapshot);
+  const normalized: NormalizedTraceSnapshot = {
+    schemaVersion: TRACE_SNAPSHOT_SCHEMA_VERSION,
+    savedAt: snapshot.savedAt,
+    traces: JSON.parse(JSON.stringify(snapshot.traces)) as ActorRunTrace[],
+  };
+  assertTraceSnapshot(normalized);
+  return normalized;
 }

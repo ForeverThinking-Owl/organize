@@ -6,7 +6,11 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { assertTraceSnapshot, type TraceSnapshot } from "./trace-snapshot";
+import {
+  assertTraceSnapshot,
+  normalizeTraceSnapshot,
+  type TraceSnapshot,
+} from "./trace-snapshot";
 import type { TraceStore } from "./trace-store";
 
 export { assertTraceSnapshot } from "./trace-snapshot";
@@ -20,11 +24,11 @@ function isFileNotFound(error: unknown): boolean {
 }
 
 export async function saveTraceSnapshot(filePath: string, snapshot: TraceSnapshot): Promise<void> {
-  assertTraceSnapshot(snapshot);
+  const normalized = normalizeTraceSnapshot(snapshot);
   await mkdir(dirname(filePath), { recursive: true });
   const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporaryPath, JSON.stringify(snapshot, null, 2) + "\n", "utf8");
+    await writeFile(temporaryPath, JSON.stringify(normalized, null, 2) + "\n", "utf8");
     await rename(temporaryPath, filePath);
   } finally {
     await rm(temporaryPath, { force: true });
@@ -34,8 +38,7 @@ export async function saveTraceSnapshot(filePath: string, snapshot: TraceSnapsho
 export async function loadTraceSnapshot(filePath: string): Promise<TraceSnapshot> {
   const raw = await readFile(filePath, "utf8");
   const parsed = JSON.parse(raw) as unknown;
-  assertTraceSnapshot(parsed);
-  return parsed;
+  return normalizeTraceSnapshot(parsed);
 }
 
 export class JsonTraceStore implements TraceStore {

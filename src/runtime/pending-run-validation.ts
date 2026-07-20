@@ -152,6 +152,12 @@ function assertSkillStep(value: unknown, index: number): asserts value is SkillS
         assertStringMapping(step.outputMapping, `${path}.outputMapping`);
       }
       break;
+    case "handoff":
+      requireString(step.targetActorId, `${path}.targetActorId`);
+      requireString(step.targetSkillId, `${path}.targetSkillId`);
+      requireString(step.reason, `${path}.reason`);
+      assertStringMapping(step.inputMapping, `${path}.inputMapping`);
+      break;
     case "human_input":
       requireString(step.prompt, `${path}.prompt`);
       requireString(step.outputKey, `${path}.outputKey`);
@@ -191,6 +197,9 @@ function assertSkill(value: unknown): asserts value is Skill {
       invalid(`skill.steps contains duplicate stepKey ${step.stepKey}`);
     }
     stepKeys.add(step.stepKey);
+    if (step.type === "handoff" && index !== steps.length - 1) {
+      invalid(`skill.steps[${index}] handoff must be the final step`);
+    }
   }
 }
 

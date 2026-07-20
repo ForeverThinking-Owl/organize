@@ -11,6 +11,7 @@ import {
   ToolCallStep,
   LLMJudgeStep,
   TransformStep,
+  HandoffStep,
 } from "../core/types/skill";
 import { ToolCallRequest, ToolObservation } from "../core/types/tool";
 import { traceLogger } from "../trace/trace-logger";
@@ -25,7 +26,7 @@ export interface SkillState {
   outputs: Record<string, unknown>;
   /** 可引用的上下文变量 */
   context: Record<string, unknown>;
-  status: "running" | "completed" | "waiting_approval" | "waiting_human_input" | "waiting_external_event" | "error";
+  status: "running" | "completed" | "handoff_requested" | "waiting_approval" | "waiting_human_input" | "waiting_external_event" | "error";
   observations: ToolObservation[];
 }
 
@@ -208,6 +209,24 @@ export class SkillRuntime {
     traceLogger.record(actorRunId, "skill_step_end", {
       stepKey: step.stepKey,
       outputKey: step.outputKey,
+    });
+  }
+
+  startHandoffStep(step: HandoffStep, actorRunId: string): void {
+    traceLogger.record(actorRunId, "skill_step_start", {
+      stepKey: step.stepKey,
+      stepType: "handoff",
+      targetActorId: step.targetActorId,
+      targetSkillId: step.targetSkillId,
+    });
+  }
+
+  completeHandoffStep(step: HandoffStep, actorRunId: string): void {
+    traceLogger.record(actorRunId, "skill_step_end", {
+      stepKey: step.stepKey,
+      status: "handoff_requested",
+      targetActorId: step.targetActorId,
+      targetSkillId: step.targetSkillId,
     });
   }
 
